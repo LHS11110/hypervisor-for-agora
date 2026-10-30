@@ -1,0 +1,18 @@
+[Unit]
+Description=Agora runtime outbound NAT firewall
+After=network-online.target docker.service ufw.service
+Wants=network-online.target
+Before=agora-runtime-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -I /usr/local/lib/agora-hypervisor/runtime-network.py firewall-up
+ExecReload=/usr/bin/python3 -I /usr/local/lib/agora-hypervisor/runtime-network.py firewall-up
+User=root
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

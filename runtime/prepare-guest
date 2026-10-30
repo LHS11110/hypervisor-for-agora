@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Build a guest image on the host; the host supplies isolated outbound NAT for running guests.
+set -euo pipefail
+umask 077
+[[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 1; }
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+DEST=${1:-/var/lib/agora-runtime}
+[[ "$DEST" = /* && ! -L "$DEST" ]] || { echo 'Expected a safe absolute destination.' >&2; exit 1; }
+for command in docker mkfs.ext4 zstd modprobe; do command -v "$command" >/dev/null; done
+mkdir -p "$DEST"
+[[ ! -e "$DEST/base.raw" && ! -e "$DEST/vmlinuz" ]] || { echo 'Guest image already exists.' >&2; exit 1; }
+TEMP=$(mktemp -d "$DEST/.prepare.XXXXXXXX")
+container=
+cleanup() {
+  if [[ -n "$container" ]]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
+  rm -rf -- "$TEMP"
+}
+trap cleanup EXIT
+cp "$ROOT/runtime/runtime_options.py" "$ROOT/runtime/guest/runtime_options.py"
+docker build -t agora-runtime-guest:local "$ROOT/runtime/guest"
+container=$(docker create agora-runtime-guest:local)
+mkdir "$TEMP/root"
+docker export "$container" | tar -xf - -C "$TEMP/root"
+for name in vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport; do
+  module=$(modinfo -n "$name")
+  case "$module" in
+    *.zst) zstd -dq "$module" -o "$TEMP/root/runtime-modules/$name.ko" ;;
+    *.ko) cp -- "$module" "$TEMP/root/runtime-modules/$name.ko" ;;
+    *) echo "Unexpected module format: $name" >&2; exit 1 ;;
+  esac
+done
+truncate -s 6G "$TEMP/base.raw"
+mkfs.ext4 -q -F -d "$TEMP/root" "$TEMP/base.raw"
+cp "/boot/vmlinuz-$(uname -r)" "$TEMP/vmlinuz"
+chmod 0644 "$TEMP/vmlinuz"
+mv "$TEMP/base.raw" "$DEST/base.raw"
+mv "$TEMP/vmlinuz" "$DEST/vmlinuz"
+printf 'Prepared guest image with host kernel %s.\n' "$(uname -r)"

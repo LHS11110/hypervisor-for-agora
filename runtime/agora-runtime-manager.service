@@ -1,0 +1,33 @@
+[Unit]
+Description=Agora canvas runtime manager
+After=local-fs.target agora-runtime-egress.service
+Requires=agora-runtime-egress.service
+ConditionPathExists=/var/lib/agora-runtime/base.raw
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3 -I /usr/local/lib/agora-hypervisor/runtime-manager.py
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/agora-runtime /run/agora-runtime
+MemoryMax=256M
+TasksMax=64
+LimitCORE=0
+Restart=on-failure
+RuntimeDirectory=agora-runtime
+RuntimeDirectoryMode=0710
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

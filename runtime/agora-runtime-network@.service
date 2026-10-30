@@ -1,0 +1,16 @@
+[Unit]
+Description=Agora canvas %i outbound network namespace
+Requires=agora-runtime-egress.service
+After=agora-runtime-egress.service
+Before=agora-runtime@%i.service
+PartOf=agora-runtime@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+ExecStart=/usr/bin/python3 -I /usr/local/lib/agora-hypervisor/runtime-network.py up %i
+ExecStop=/usr/bin/python3 -I /usr/local/lib/agora-hypervisor/runtime-network.py down %i
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+UMask=0077

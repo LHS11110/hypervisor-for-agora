@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+STATE=${AGORA_STATE_DIR:-"$ROOT/.local"}
+BIN="$STATE/bin"
+SOCKET="$STATE/api.sock"
+VERSION=v54.0
+FIRMWARE_VERSION=ch-97eeb7b09
+fail() { echo "error: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || fail "Missing command: $1"; }
+verify_assets() {
+    (cd "$STATE"; sha256sum --check --status "$ROOT/config/SHA256SUMS") || fail 'Asset checksum mismatch. Remove the affected asset and run setup.'
+}
+# Production execution is always delegated to the isolated system service.
+case "${1:-help}" in
+    run) exec "$ROOT/scripts/managed-hypervisor" start ;;
+    ping|shutdown|power-button) exec "$ROOT/scripts/managed-hypervisor" "$1" ;;
+esac
+need python3
+if [[ ${1:-help} != help ]]; then
+    if [[ ${1:-} == setup ]]; then
+        python3 -I "$ROOT/scripts/security.py" state "$STATE" init
+    else
+        python3 -I "$ROOT/scripts/security.py" state "$STATE"
+    fi
+fi
+# Serialize setup, image preparation and the full VM lifetime, including socket cleanup.
+case "${1:-help}" in
+    setup|prepare|run-dev)
+        need flock
+        exec 9>"$STATE/.lock"
+        flock --nonblock 9 || fail 'Another setup/prepare/VM operation holds the state lock.'
+        ;;
+esac
+download() {
+    local url=$1 destination=$2 maximum=${3:-33554432}
+    if [[ ! -s "$destination" ]]; then
+        curl --disable --proto '=https' --proto-redir '=https' --fail --location --retry 3 --connect-timeout 10 --max-time 600 --max-filesize "$maximum" "$url" -o "$destination.part"
+        mv -- "$destination.part" "$destination"
+    fi
+}
+case "${1:-help}" in
+setup)
+    [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || fail 'This setup targets Linux x86_64.'
+    need curl
+    mkdir -p "$BIN" "$STATE/firmware"
+    for name in cloud-hypervisor ch-remote; do
+        download "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$VERSION/$name-static" "$BIN/$name"
+        chmod +x "$BIN/$name"
+    done
+    download "https://github.com/cloud-hypervisor/edk2/releases/download/$FIRMWARE_VERSION/CLOUDHV.fd" "$STATE/firmware/CLOUDHV.fd"
+    verify_assets
+    "$BIN/cloud-hypervisor" --version
+    ;;
+doctor)
+    [[ -r /dev/kvm && -w /dev/kvm ]] || fail '/dev/kvm must be readable and writable (check the kvm group).'
+    [[ -x "$BIN/cloud-hypervisor" && -x "$BIN/ch-remote" ]] || fail 'Run scripts/hypervisor setup first.'
+    [[ -s "$STATE/firmware/CLOUDHV.fd" ]] || fail 'Firmware missing; run setup.'
+    verify_assets
+    "$BIN/cloud-hypervisor" --version
+    echo 'KVM and firmware are ready.'
+    ;;
+prepare)
+    [[ $EUID != 0 ]] || fail 'Prepare images as an unprivileged user; root is refused.'
+    need ssh-keygen
+    need gpgv
+    need curl; need sha256sum; need qemu-img; need cloud-localds; need python3
+    [[ -n ${2:-} && -s "$2" ]] || fail 'Usage: scripts/hypervisor prepare /path/to/ssh-public-key.pub'
+    ssh-keygen -l -f "$2" >/dev/null || fail 'Invalid SSH public key.'
+    [[ ! -e "$STATE/guest.raw" && ! -e "$STATE/seed.img" ]] || fail 'Guest already exists. Use a new AGORA_STATE_DIR for another VM.'
+    mkdir -p "$STATE/images"
+    readarray -t image_config < <(python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); print(c["base_url"]); print(c["filename"])' "$ROOT/config/ubuntu-image.json")
+    base=${image_config[0]}; image=${image_config[1]}
+    download "$base/$image" "$STATE/images/$image" 1073741824
+    download "$base/SHA256SUMS" "$STATE/images/SHA256SUMS" 1048576
+    download "$base/SHA256SUMS.gpg" "$STATE/images/SHA256SUMS.gpg" 1048576
+    python3 -I "$ROOT/scripts/verify-image.py" "$ROOT/config/ubuntu-image.json" "$STATE/images"
+    python3 -I - "$2" "$STATE" <<'PY'
+import json, pathlib, sys
+key = pathlib.Path(sys.argv[1]).read_text().strip()
+if '\n' in key or not key.startswith(('ssh-', 'ecdsa-', 'sk-')):
+    raise SystemExit('Expected one OpenSSH public key')
+p = pathlib.Path(sys.argv[2])
+config = {'users': [{'name': 'agora', 'shell': '/bin/bash', 'lock_passwd': True, 'ssh_authorized_keys': [key]}], 'ssh_pwauth': False, 'disable_root': True}
+(p / 'user-data').write_text('#cloud-config\n' + json.dumps(config) + '\n')
+(p / 'meta-data').write_text('instance-id: agora-local\nlocal-hostname: agora\n')
+PY
+    cloud-localds "$STATE/seed.img" "$STATE/user-data" "$STATE/meta-data"
+    qemu-img convert -f qcow2 -O raw "$STATE/images/$image" "$STATE/guest.raw.part"
+    qemu-img resize -f raw "$STATE/guest.raw.part" 10G
+    mv "$STATE/guest.raw.part" "$STATE/guest.raw"
+    ;;
+run-dev)
+    [[ $EUID != 0 ]] || fail 'Run VM as an unprivileged user with KVM access; root is refused.'
+    "$0" doctor
+    [[ ${AGORA_CPUS:-2} =~ ^[1-8]$ ]] || fail 'AGORA_CPUS must be 1..8.'
+    [[ ${AGORA_MEMORY:-1024M} =~ ^[1-9][0-9]*M$ ]] || fail 'AGORA_MEMORY must be an integer MiB value, e.g. 1024M.'
+    memory=${AGORA_MEMORY:-1024M}; memory=${memory%M}
+    [[ ${#memory} -le 4 ]] && (( memory >= 256 && memory <= 8192 )) || fail 'Memory must be 256M..8192M.'
+    [[ -z ${AGORA_TAP:-} || ${AGORA_TAP} =~ ^[a-zA-Z0-9_-]{1,15}$ ]] || fail 'Invalid TAP name.'
+    [[ -s "$STATE/guest.raw" && -s "$STATE/seed.img" ]] || fail 'Run prepare first.'
+    [[ ! -e "$SOCKET" ]] || fail "API socket exists: $SOCKET. Check the running VM before removing a stale socket."
+    args=(--api-socket "$SOCKET" --firmware "$STATE/firmware/CLOUDHV.fd"
+          --cpus "boot=${AGORA_CPUS:-2}" --memory "size=${AGORA_MEMORY:-1024M}"
+          --disk "path=$STATE/guest.raw,image_type=raw,backing_files=off" "path=$STATE/seed.img,image_type=raw,backing_files=off,readonly=on"
+          --console off --serial "file=$STATE/serial.log" --seccomp true --landlock)
+    if [[ -n ${AGORA_TAP:-} ]]; then args+=(--net "tap=$AGORA_TAP,mac=02:00:00:00:00:01"); fi
+    child=
+    cleanup() {
+        if [[ -n "$child" ]] && kill -0 "$child" 2>/dev/null; then
+            kill -TERM "$child" 2>/dev/null || true
+            wait "$child" 2>/dev/null || true
+        fi
+        rm -f -- "$SOCKET"
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    python3 -I "$ROOT/scripts/security.py" exec "$BIN/cloud-hypervisor" "${args[@]}" <&0 &
+    child=$!
+    result=0
+    wait "$child" || result=$?
+    child=
+    exit "$result"
+    ;;
+dev-ping|dev-shutdown|dev-power-button)
+    verify_assets
+    [[ -S "$SOCKET" ]] || fail 'No running VM API socket.'
+    exec "$BIN/ch-remote" --api-socket "$SOCKET" "${1#dev-}"
+    ;;
+*)
+    echo 'Usage: scripts/hypervisor {setup|doctor|prepare SSH_PUBLIC_KEY|run|ping|power-button|shutdown|run-dev|dev-ping|dev-power-button|dev-shutdown}'
+    ;;
+esac

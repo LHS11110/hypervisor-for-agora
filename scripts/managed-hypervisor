@@ -1,0 +1,175 @@
+#!/usr/bin/python3 -I
+"""Install and control the root-owned, isolated system service. Run with sudo."""
+import fcntl
+import hashlib
+import os
+import pwd
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+PREFIX = Path('/usr/local/lib/agora-hypervisor')
+STATE = Path('/var/lib/agora-hypervisor')
+UNIT = 'agora-hypervisor.service'
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def stopped():
+    status = subprocess.run(['systemctl', 'is-active', UNIT], capture_output=True, text=True).stdout.strip()
+    if status in ('active', 'activating', 'deactivating', 'reloading'):
+        raise ValueError('Stop the service before install/import')
+
+
+def open_source(directory, name, maximum):
+    if not directory.is_absolute() or '..' in directory.parts:
+        raise ValueError('Source must be absolute with no parent traversal')
+    # Walk with directory descriptors: no path component may turn into a symlink mid-read.
+    parent = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in directory.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        owner = os.fstat(parent).st_uid
+        parts = Path(name).parts
+        if Path(name).is_absolute() or '..' in parts:
+            raise ValueError('Invalid source asset name')
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    f = os.fdopen(fd, 'rb')
+    s = os.fstat(fd)
+    if (not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_uid != owner
+            or s.st_mode & 0o6022 or not 0 < s.st_size <= maximum):
+        f.close()
+        raise ValueError(f'Unsafe input file: {directory / name}')
+    return f, s.st_size
+
+
+def install(source):
+    stopped()
+    # All installed executable material is verified before any root execution.
+    assets = {}
+    for line in (ROOT / 'config/SHA256SUMS').read_text().splitlines():
+        digest, name = line.split()
+        with open_source(source, name, 32 * 1024 * 1024)[0] as f:
+            data = f.read(32 * 1024 * 1024 + 1)
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError(f'Checksum mismatch: {source / name}')
+        assets[name] = data
+    sysusers = Path('/etc/sysusers.d/agora-hypervisor.conf')
+    sysusers.parent.mkdir(mode=0o755, exist_ok=True)
+    sysusers.write_text('u agora-vmm - "Agora VM isolation" /nonexistent /usr/sbin/nologin\n')
+    sysusers.chmod(0o644)
+    run('systemd-sysusers', str(sysusers))
+    account = pwd.getpwnam('agora-vmm')
+    if account.pw_uid == 0 or account.pw_shell != '/usr/sbin/nologin' or account.pw_dir != '/nonexistent':
+        raise ValueError('Existing agora-vmm account is not a dedicated nologin account')
+    PREFIX.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if PREFIX.is_symlink() or PREFIX.stat().st_uid != 0 or PREFIX.stat().st_mode & 0o022:
+        raise ValueError('Unsafe installation directory')
+    PREFIX.chmod(0o755)
+    jail = PREFIX / 'root'
+    for name in ('bin', 'firmware', 'dev', 'proc', 'sys', 'tmp', 'data', 'control'):
+        (jail / name).mkdir(mode=0o755, parents=True, exist_ok=True)
+        (jail / name).chmod(0o755)
+    jail.chmod(0o755)
+    for name, dest in [('bin/cloud-hypervisor', PREFIX / 'cloud-hypervisor'),
+                       ('bin/ch-remote', PREFIX / 'ch-remote'),
+                       ('firmware/CLOUDHV.fd', jail / 'firmware/CLOUDHV.fd')]:
+        if dest.is_symlink():
+            raise ValueError(f'Unexpected installed symlink: {dest}')
+        dest.write_bytes(assets[name])
+        dest.chmod(0o755 if dest.name != 'CLOUDHV.fd' else 0o644)
+        os.chown(dest, 0, 0)
+    # No working-account credentials enter the jail.
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    STATE.chmod(0o700)
+    for name in (UNIT, 'agora-hypervisor.socket'):
+        shutil.copyfile(ROOT / 'systemd' / name, Path('/etc/systemd/system') / name)
+        (Path('/etc/systemd/system') / name).chmod(0o644)
+    run('systemd-analyze', 'verify', '/etc/systemd/system/' + UNIT)
+    shutil.copyfile(ROOT / 'systemd/journald-agora.conf', '/etc/systemd/journald@agora-hypervisor.conf')
+    Path('/etc/systemd/journald@agora-hypervisor.conf').chmod(0o644)
+    run('systemctl', 'daemon-reload')
+    print('Installed. Import a prepared guest, then start. Boot auto-start is not enabled.')
+
+
+def import_guest(source):
+    stopped()
+    if not (PREFIX / 'cloud-hypervisor').exists():
+        raise ValueError('Run install first')
+    if any((STATE / name).exists() for name in ('guest.raw', 'seed.img')):
+        raise ValueError('An imported guest already exists; refusing to overwrite it')
+    inputs = []
+    try:
+        for name, maximum in [('guest.raw', 10 * 1024**3), ('seed.img', 16 * 1024**2)]:
+            src, size = open_source(source, name, maximum)
+            inputs.append((name, src, size))
+        for name, src, size in inputs:
+            dest = STATE / (name + '.part')
+            with dest.open('xb') as out:
+                os.fchmod(out.fileno(), 0o600)
+                os.posix_fallocate(out.fileno(), 0, size)
+                remaining = size
+                while remaining:
+                    chunk = src.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError('Source changed during import')
+                    out.write(chunk)
+                    remaining -= len(chunk)
+                if src.read(1):
+                    raise ValueError('Source grew during import')
+                out.flush()
+                os.fsync(out.fileno())
+        for name, _, _ in inputs:
+            (STATE / (name + '.part')).rename(STATE / name)
+    finally:
+        for _, src, _ in inputs:
+            src.close()
+    print('Imported with disk space reserved. Start using: sudo scripts/managed-hypervisor start')
+
+
+def main():
+    if os.geteuid() != 0:
+        raise ValueError('Use sudo: system service management requires administrator privileges')
+    os.umask(0o077)
+    os.environ.clear()
+    os.environ.update({'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8'})
+    lock = os.open('/run/agora-hypervisor-admin.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    command = sys.argv[1] if len(sys.argv) > 1 else 'help'
+    source = Path(sys.argv[2]).absolute() if len(sys.argv) > 2 else ROOT / '.local'
+    if command == 'install':
+        install(source)
+    elif command == 'import':
+        import_guest(source)
+    elif command in ('start', 'stop', 'status'):
+        run('systemctl', command, UNIT, '--no-pager')
+        if command == 'start':
+            run('systemctl', 'is-active', '--quiet', UNIT)
+    elif command in ('ping', 'power-button', 'shutdown'):
+        if subprocess.run(['systemctl', 'is-active', '--quiet', UNIT]).returncode:
+            raise ValueError('The service is not running')
+        run(str(PREFIX / 'ch-remote'), '--api-socket', '/run/agora-hypervisor.sock', command)
+        if command == 'shutdown':
+            run('systemctl', 'stop', UNIT)
+    else:
+        print('Usage: sudo scripts/managed-hypervisor {install [STATE]|import [STATE]|start|stop|status|ping|power-button|shutdown}')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as e:
+        sys.exit(f'error: {e}')

@@ -1,0 +1,3 @@
+4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b  bin/cloud-hypervisor
+acd5be240d5c73373effbe818908fc03e313ec8486237904bff11d93b71b1c83  bin/ch-remote
+dc2fc8f0e43b96712d9fccc52a3a590769606412b3e1bc911d217addd3bef624  firmware/CLOUDHV.fd

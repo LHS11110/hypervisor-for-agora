@@ -1,0 +1,10 @@
+[Unit]
+Description=Root-only Agora hypervisor control socket
+PartOf=agora-hypervisor.service
+
+[Socket]
+ListenStream=/run/agora-hypervisor.sock
+SocketMode=0600
+SocketUser=root
+SocketGroup=root
+RemoveOnStop=yes

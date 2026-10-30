@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev || true
+mount -t cgroup2 cgroup2 /sys/fs/cgroup
+echo '+cpu +memory +pids' > /sys/fs/cgroup/cgroup.subtree_control
+insmod /runtime-modules/vsock.ko
+insmod /runtime-modules/vmw_vsock_virtio_transport_common.ko
+insmod /runtime-modules/vmw_vsock_virtio_transport.ko
+# Each VM has the same private guest subnet inside its own host namespace.
+printf '1\n' > /proc/sys/net/ipv6/conf/all/disable_ipv6
+printf '1\n' > /proc/sys/net/ipv6/conf/default/disable_ipv6
+ip link set lo up
+ip link set eth0 up
+ip address add 10.205.0.2/30 dev eth0
+ip route add default via 10.205.0.1
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n' > /etc/resolv.conf
+mkdir -p /workspace/.python
+chown 1000:1000 /workspace/.python
+exec /usr/local/bin/python3 -I /usr/local/lib/agora-runner.py

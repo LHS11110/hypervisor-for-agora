@@ -1,0 +1,6 @@
+{
+  "base_url": "https://cloud-images.ubuntu.com/releases/noble/release-20261017",
+  "filename": "ubuntu-24.04-server-cloudimg-amd64.img",
+  "sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
+  "signing_fingerprint": "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81"
+}

@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Offline image upgrade. Preserve each canvas /workspace and retain rollback disks.
+set -euo pipefail
+umask 077
+[[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 1; }
+STATE=/var/lib/agora-runtime
+NEW=${1:?Pass the directory produced by prepare-guest}
+[[ -f "$NEW/base.raw" && -f "$NEW/vmlinuz" ]] || exit 1
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+BACKUP="$STATE/backup-$STAMP"
+mkdir -p "$BACKUP"
+TEMP=$(mktemp -d "$STATE/.upgrade.XXXXXXXX")
+mkdir "$TEMP/old" "$TEMP/new"
+mapfile -t ACTIVE < <(systemctl list-units --type=service --state=active --plain --no-legend 'agora-runtime@*.service' | awk '{print $1}')
+cleanup() {
+  result=$?
+  mountpoint -q "$TEMP/new" && umount "$TEMP/new" || true
+  mountpoint -q "$TEMP/old" && umount "$TEMP/old" || true
+  rm -rf "$TEMP"
+  if [[ $result != 0 ]]; then
+    echo 'Upgrade failed; restoring previous disks and manager.' >&2
+    for disk in "$BACKUP"/*.raw; do
+      [[ -f "$disk" ]] || continue
+      name=${disk##*/}
+      if [[ "$name" == base.raw ]]; then target="$STATE/base.raw";
+      else target="$STATE/canvases/${name%.raw}/guest.raw"; fi
+      cp --reflink=never --sparse=never "$disk" "$target"
+    done
+    [[ ! -f "$BACKUP/manager.py" ]] || install -m 0644 "$BACKUP/manager.py" /usr/local/lib/agora-hypervisor/runtime-manager.py
+    [[ ! -f "$BACKUP/runtime_options.py" ]] || install -m 0644 "$BACKUP/runtime_options.py" /usr/local/lib/agora-hypervisor/runtime_options.py
+    [[ ! -f "$BACKUP/agora-runtime@.service" ]] || install -m 0644 "$BACKUP/agora-runtime@.service" /etc/systemd/system/agora-runtime@.service
+    systemctl daemon-reload
+    [[ ! -f "$BACKUP/vmlinuz" ]] || cp "$BACKUP/vmlinuz" /usr/local/lib/agora-hypervisor/root/firmware/vmlinuz
+    systemctl start agora-runtime-manager.service
+    for unit in "${ACTIVE[@]}"; do systemctl start "$unit"; done
+  fi
+  exit "$result"
+}
+trap cleanup EXIT
+cp /usr/local/lib/agora-hypervisor/runtime-manager.py "$BACKUP/manager.py"
+cp /usr/local/lib/agora-hypervisor/runtime_options.py "$BACKUP/runtime_options.py"
+cp /etc/systemd/system/agora-runtime@.service "$BACKUP/agora-runtime@.service"
+cp "$STATE/vmlinuz" "$BACKUP/vmlinuz"
+systemctl stop agora-runtime-manager.service
+for unit in "${ACTIVE[@]}"; do systemctl stop "$unit"; done
+for directory in "$STATE"/canvases/*; do
+  [[ -f "$directory/guest.raw" ]] || continue
+  canvas=${directory##*/}
+  cp --reflink=auto --sparse=always "$directory/guest.raw" "$BACKUP/$canvas.raw"
+  # Keep expanded capacity when replacing the OS image.
+  OLD_SIZE=$(stat -c %s "$directory/guest.raw")
+  BASE_SIZE=$(stat -c %s "$NEW/base.raw")
+  TARGET_SIZE=$(( OLD_SIZE > BASE_SIZE ? OLD_SIZE : BASE_SIZE ))
+  AVAILABLE=$(df --output=avail -B1 "$directory" | tail -1)
+  (( AVAILABLE >= TARGET_SIZE + 8 * 1024 * 1024 * 1024 )) || { echo 'Insufficient disk space for upgrade.' >&2; exit 1; }
+  cp --reflink=never --sparse=never "$NEW/base.raw" "$directory/guest.next"
+  python3 - "$directory/guest.next" "$TARGET_SIZE" <<'ALLOCATE'
+import os,sys
+with open(sys.argv[1], 'r+b') as disk: os.posix_fallocate(disk.fileno(),0,int(sys.argv[2]))
+ALLOCATE
+  e2fsck -pf "$directory/guest.next" || [[ $? == 1 ]]
+  resize2fs "$directory/guest.next"
+  # Replay any guest journal after stopping the VM, before reading its workspace.
+  e2fsck -pf "$directory/guest.raw" || [[ $? == 1 ]]
+  mount -o loop,ro,nosuid,nodev,noexec "$directory/guest.raw" "$TEMP/old"
+  mount -o loop,rw,nosuid,nodev,noexec "$directory/guest.next" "$TEMP/new"
+  tar -C "$TEMP/old" -cf - workspace | tar -C "$TEMP/new" -xpf -
+  sync -f "$TEMP/new"
+  umount "$TEMP/new"
+  umount "$TEMP/old"
+  chown --reference="$directory/guest.raw" "$directory/guest.next"
+  chmod --reference="$directory/guest.raw" "$directory/guest.next"
+  mv "$directory/guest.next" "$directory/guest.raw"
+done
+cp --reflink=auto --sparse=always "$STATE/base.raw" "$BACKUP/base.raw"
+mv "$NEW/base.raw" "$STATE/base.raw"
+cp "$NEW/vmlinuz" /usr/local/lib/agora-hypervisor/root/firmware/vmlinuz
+cp "$NEW/vmlinuz" "$STATE/vmlinuz"
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+install -m 0644 "$ROOT/runtime/runtime_options.py" /usr/local/lib/agora-hypervisor/runtime_options.py
+install -m 0644 "$ROOT/runtime/manager.py" /usr/local/lib/agora-hypervisor/runtime-manager.py
+install -m 0644 "$ROOT/runtime/agora-runtime@.service" /etc/systemd/system/agora-runtime@.service
+systemd-analyze verify /etc/systemd/system/agora-runtime@.service
+systemctl daemon-reload
+systemctl start agora-runtime-manager.service
+for unit in "${ACTIVE[@]}"; do systemctl start "$unit"; done
+printf 'Upgraded guests; rollback disks: %s\n' "$BACKUP"
