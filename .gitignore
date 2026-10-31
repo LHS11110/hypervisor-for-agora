@@ -146,3 +146,25 @@ Desktop.ini
 
 # Keep config checksums, public GPG signature fixtures and dependency lockfiles.
 # Deliberately no blanket rules for *.gpg, *.json, *.service, *.socket or *.lock.
+
+# Local authentication files and generated audit/test artifacts
+.netrc
+.pypirc
+client_secret*.json
+service-account*.json
+application_default_credentials.json
+id_rsa
+id_ed25519
+coverage/
+test-results/
+playwright-report/
+*.sql.gz
+*.rdb
+appendonlydir/
+*.jks
+*.crt
+*.cer
+*.der
+*.db
+*.sqlite
+*.sqlite3
