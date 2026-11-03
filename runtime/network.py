@@ -24,6 +24,10 @@ BLOCKED = ('0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
            '224.0.0.0/4', '240.0.0.0/4')
 CHAIN = 'AGORA-RUNTIME'
 NAT = 'AGORA-RUNTIME-NAT'
+HTTPS_IN='AGORA-HTTPS-IN'
+HTTPS_OUT='AGORA-HTTPS-OUT'
+HTTPS_NAT='AGORA-HTTPS-NAT'
+HTTPS_NS='AGORA-HTTPS'
 
 
 def call(*args, check=True, input=None):
@@ -54,23 +58,68 @@ def blocked_networks():
     return [*BLOCKED, *(str(ipaddress.IPv4Network(value, strict=False)) for value in extra)]
 
 
+def public_https():
+    """Explicit public proxy exceptions, never arbitrary internal destinations."""
+    values=json.loads(CONFIG.read_text()).get('public_https_ipv4',[]) if CONFIG.exists() else []
+    if not isinstance(values,list) or len(values)>8:raise ValueError('Invalid public HTTPS addresses')
+    result=[]
+    for value in values:
+        address=ipaddress.IPv4Address(value)
+        if not address.is_global:raise ValueError('HTTPS exception must be a public IPv4 address')
+        if str(address) not in result:result.append(str(address))
+    return result
+
+
+def ingress_address(interface):
+    links=json.loads(call('ip','-j','-4','address','show','dev',interface,'scope','global').stdout)
+    values=[entry['local'] for link in links for entry in link.get('addr_info',[]) if entry.get('family')=='inet']
+    if not values:raise RuntimeError('No HTTPS ingress address')
+    return str(ipaddress.IPv4Address(values[0]))
+
+
+def namespace_https(namespace):
+    def ns(*args,check=True):return call('ip','netns','exec',namespace,*args,check=check)
+    if ns('iptables','-w','5','-n','-L',HTTPS_NS,check=False).returncode:
+        ns('iptables','-w','5','-N',HTTPS_NS)
+    rules=['*filter',f'-F {HTTPS_NS}']
+    for address in public_https():
+        rules.append(f'-A {HTTPS_NS} -i tap0 -o wan0 -s 10.205.0.2/32 -d {address}/32 -p tcp --dport 443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT')
+    rules+=['COMMIT']
+    call('ip','netns','exec',namespace,'iptables-restore','--wait','5','--noflush',input='\n'.join(rules)+'\n')
+    if ns('iptables','-w','5','-C','FORWARD','-j',HTTPS_NS,check=False).returncode:
+        ns('iptables','-w','5','-I','FORWARD','1','-j',HTTPS_NS)
+
+
 def firewall_up():
     interface = uplink()
+    endpoints=public_https()
+    ingress=ingress_address(interface) if endpoints else None
     # Dedicated owned chains are refreshed atomically; other host rules are untouched.
-    for table, chain in (('filter', CHAIN), ('nat', NAT)):
+    for table, chain in (('filter', CHAIN), ('nat', NAT), ('filter',HTTPS_IN),('filter',HTTPS_OUT),('nat',HTTPS_NAT)):
         if ipt('-t', table, '-n', '-L', chain, check=False).returncode:
             ipt('-t', table, '-N', chain)
-    rules = ['*filter', f'-F {CHAIN}', f'-A {CHAIN} -m conntrack --ctstate INVALID -j DROP',
+    rules=['*filter',f'-F {HTTPS_IN}',f'-F {HTTPS_OUT}']
+    for address in endpoints:
+        original=f'-m conntrack --ctorigdst {address} --ctorigdstport 443'
+        rules += [f'-A {HTTPS_IN} -i agv+ -s {TRANSIT} -d {ingress}/32 -p tcp --dport 443 {original} --ctstate NEW,ESTABLISHED -j ACCEPT',
+                  f'-A {HTTPS_OUT} -o agv+ -d {TRANSIT} -s {ingress}/32 -p tcp --sport 443 {original} --ctstate ESTABLISHED -j ACCEPT']
+    rules += [f'-A {HTTPS_IN} -j DROP',f'-A {HTTPS_OUT} -j DROP',f'-F {CHAIN}', f'-A {CHAIN} -m conntrack --ctstate INVALID -j DROP',
              f'-A {CHAIN} -i agv+ ! -s {TRANSIT} -j DROP']
     for network in blocked_networks():
         rules.append(f'-A {CHAIN} -i agv+ -d {network} -j DROP')
     rules += [f'-A {CHAIN} -i agv+ -o {interface} -s {TRANSIT} -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT',
               f'-A {CHAIN} -i {interface} -o agv+ -d {TRANSIT} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
               f'-A {CHAIN} -j DROP', 'COMMIT', '*nat', f'-F {NAT}',
-              f'-A {NAT} -s {TRANSIT} -o {interface} -j MASQUERADE', 'COMMIT']
+              f'-A {NAT} -s {TRANSIT} -o {interface} -j MASQUERADE',f'-F {HTTPS_NAT}']
+    for address in endpoints:
+        rules.append(f'-A {HTTPS_NAT} -i agv+ -s {TRANSIT} -d {address}/32 -p tcp --dport 443 -j DNAT --to-destination {ingress}:443')
+    rules+=['COMMIT']
     call('iptables-restore', '--wait', '5', '--noflush', input='\n'.join(rules)+'\n')
-    ensure_rule('filter', 'INPUT', '-i', 'agv+', '-j', 'DROP')
-    ensure_rule('filter', 'OUTPUT', '-o', 'agv+', '-j', 'DROP')
+    ensure_rule('filter', 'INPUT', '-i', 'agv+', '-j', HTTPS_IN)
+    ipt('-D','INPUT','-i','agv+','-j','DROP',check=False)
+    ensure_rule('filter', 'OUTPUT', '-o', 'agv+', '-j', HTTPS_OUT)
+    ipt('-D','OUTPUT','-o','agv+','-j','DROP',check=False)
+    ensure_rule('nat','PREROUTING','-i','agv+','-j',HTTPS_NAT)
     ensure_rule('filter', 'FORWARD', '-i', 'agv+', '-j', CHAIN)
     ensure_rule('filter', 'FORWARD', '-o', 'agv+', '-j', CHAIN)
     ensure_rule('nat', 'POSTROUTING', '-s', str(TRANSIT), '-j', NAT)
@@ -101,6 +150,7 @@ def up(canvas, state):
     namespace, host = names(canvas)
     firewall_up()
     if canvas in state and Path('/run/netns', namespace).exists():
+        namespace_https(namespace)
         return
     down(canvas, state)
     used = set(state.values())
@@ -123,7 +173,8 @@ def up(canvas, state):
         ns('ip', 'address', 'add', '10.205.0.1/30', 'dev', 'tap0')
         ns('ip', 'link', 'set', 'tap0', 'up')
         # Defence in depth: unsolicited traffic is dropped even if host firewall
-        # rules change. No DNAT, bridge, host services, or guest inbound openings.
+        # rules change. No guest inbound mappings or private-service access; only
+        # explicitly configured public proxy HTTPS may reach the host gateway.
         rules = ['*filter', ':INPUT DROP [0:0]', ':FORWARD DROP [0:0]', ':OUTPUT ACCEPT [0:0]',
                  '-A INPUT -i lo -j ACCEPT', '-A FORWARD -m conntrack --ctstate INVALID -j DROP',
                  '-A FORWARD -i tap0 ! -s 10.205.0.2/32 -j DROP']
@@ -134,6 +185,7 @@ def up(canvas, state):
                   'COMMIT', '*nat', ':POSTROUTING ACCEPT [0:0]',
                   '-A POSTROUTING -s 10.205.0.2/32 -o wan0 -j MASQUERADE', 'COMMIT']
         call('ip', 'netns', 'exec', namespace, 'iptables-restore', input='\n'.join(rules)+'\n')
+        namespace_https(namespace)
         state[canvas] = slot
     except BaseException:
         down(canvas, state)

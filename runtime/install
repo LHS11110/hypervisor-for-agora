@@ -12,7 +12,7 @@ install -m 0644 "$ROOT/runtime/network.py" /usr/local/lib/agora-hypervisor/runti
 install -m 0644 "$ROOT/runtime/agora-runtime-egress.service" /etc/systemd/system/agora-runtime-egress.service
 install -m 0644 "$ROOT/runtime/agora-runtime-network@.service" /etc/systemd/system/agora-runtime-network@.service
 if [[ ! -f /etc/agora-runtime-network.json ]]; then
-  printf '{"blocked_ipv4": []}\n' > /etc/agora-runtime-network.json
+  printf '{"blocked_ipv4": [], "public_https_ipv4": []}\n' > /etc/agora-runtime-network.json
   chmod 0600 /etc/agora-runtime-network.json
 fi
 printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/90-agora-runtime-network.conf

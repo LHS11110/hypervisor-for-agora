@@ -147,6 +147,29 @@ python3 -m orchestra.startup development --runtime --skip-initialize
 IPv4 주소/CIDR을 지정하고 `sudo systemctl reload agora-runtime-egress`로 반영합니다.
 공인 IP가 변경되면 이 목록도 갱신합니다. VM 종료 시 전용 네임스페이스와 veth를 정리합니다.
 
+VM에서 호스트의 공개 프록시를 이용해야 한다면 같은 파일의 `public_https_ipv4`에
+그 프록시의 **공인 IPv4 주소**를 추가합니다. 예:
+
+```json
+{"blocked_ipv4": ["118.34.144.201/32"], "public_https_ipv4": ["118.34.144.201"]}
+```
+
+이 예외는 공개 주소의 TCP 443만 호스트 업링크의 HTTPS 프록시로 전달합니다.
+원래 목적지와 conntrack 상태를 검사하며 SSH·80·내부 서비스 주소 및 VM으로의
+새 인바운드 연결은 허용하지 않습니다. 프록시의 도메인과 인증서는 그대로 검증합니다.
+실행 중인 네임스페이스까지 VM 재시작 없이 반영하려면 방화벽 reload 후 아래를
+각 실행 중인 캔버스 ID에 적용합니다.
+
+```bash
+sudo python3 -I /usr/local/lib/agora-hypervisor/runtime-network.py up 2102
+```
+
+호스트 IP 전체를 차단한 상태에서 이 예외가 없으면, VM의 일반 인터넷 아웃바운드가
+허용되어 있어도 해당 호스트의 공개 다운로드/API는 연결되지 않습니다.
+공인 주소가 변경되면 차단 목록과 HTTPS 예외 목록을 함께 갱신하세요.
+`runtime/tests/public_https_integration.py`는 실제 VM에서 모듈 다운로드·pip 설치·
+SDK 호출과 내부 주소/다른 포트 차단을 확인합니다.
+
 마지막 명령은 `project-orchestra` 디렉터리에서 실행합니다. 운영 배포는
 `development` 대신 `production`을 사용합니다. `--runtime`은 미리 설치된 관리자
 서비스가 실행 중인지 검사하고 Spring에만 관리자 소켓을 연결합니다.
@@ -444,3 +467,11 @@ sudo python3 runtime/tests/pip_alignment_integration.py
 설치한 뒤 같은 워커에서 import/계산·기존 변수 보존을 검증합니다. 이어 Python 3.14로
 변경한 기존 Shell의 PID/변수/사용자 검색 경로 보존, plain pip3 설치·nested pip,
 명시적 버전 명령과 VM 재시작 후 재사용을 확인하고 테스트 VM만 삭제합니다.
+
+### 실시간 코드 출력
+
+실행 요청의 `stream: true`는 guest/manager 연결에서 NDJSON 출력 프레임을 활성화합니다. `{type:"output",output:"..."}` 조각 다음에 기존 최종 결과 JSON을 반환하며, 스트림이 없는 요청은 기존 단일 JSON 응답을 유지합니다. UTF-8 분할 문자를 보존하고 출력 한도·실행 시간 제한을 유지합니다. 브라우저가 연결을 끊어도 manager는 guest 응답을 끝까지 읽으며 코드를 재실행하지 않습니다.
+
+`python3 runtime/tests/streaming_integration.py`는 예약 ID 2147483017의 독립 VM에서 6개 언어의 종료 전 출력과 최종 결과 일치를 확인하고 생성한 VM을 삭제합니다.
+
+`sudo runtime/update-agent`는 활성 VM이 없는 상태에서 runner.py와 manager.py만 갱신하는 소규모 업데이트용입니다. base 및 저장된 guest 이미지의 기존 OS·설치 패키지·workspace를 유지하며 이전 에이전트 파일을 별도 보관합니다. 컴파일러·라이브러리·언어 워커까지 변경하는 경우에는 전체 `prepare-guest`/`upgrade-guest` 절차를 사용해야 합니다.

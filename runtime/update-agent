@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Offline runner-only update, preserving guest OS, packages and /workspace."""
+import os, shutil, subprocess, tempfile, time
+from pathlib import Path
+if os.geteuid()!=0:raise SystemExit('Run as root.')
+root=Path(__file__).resolve().parent
+state=Path('/var/lib/agora-runtime')
+backup=state/('agent-backup-'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime()))
+manager=Path('/usr/local/lib/agora-hypervisor/runtime-manager.py')
+def run(*args):return subprocess.run(args,check=True,capture_output=True,text=True)
+run('systemctl','stop','agora-runtime-manager.service')
+updated=[]
+try:
+ active=run('systemctl','list-units','--type=service','--state=active','--plain','--no-legend','agora-runtime@*.service').stdout.strip()
+ if active:raise RuntimeError('Active guests exist; wait until idle before updating the runner.')
+ backup.mkdir(mode=0o700)
+ shutil.copy2(manager,backup/'manager.py')
+ disks=[state/'base.raw',*sorted((state/'canvases').glob('*/guest.raw'))]
+ with tempfile.TemporaryDirectory(prefix='agora-agent-') as temporary:
+  mount=Path(temporary)
+  for disk in disks:
+   key='base' if disk.name=='base.raw' else disk.parent.name
+   run('mount','-o','loop,rw,nosuid,nodev,noexec',str(disk),str(mount))
+   try:
+    runner=mount/'usr/local/lib/agora-runner.py'
+    shutil.copy2(runner,backup/(key+'-runner.py'))
+    updated.append((disk,key))
+    shutil.copyfile(root/'guest/runner.py',runner)
+    os.chmod(runner,0o644)
+    run('sync','-f',str(mount))
+   finally:run('umount',str(mount))
+ shutil.copyfile(root/'manager.py',manager)
+ os.chmod(manager,0o644)
+ print('Updated runner in',len(updated),'offline images; workspace and installed packages retained.')
+ print('Previous agent files:',backup)
+except BaseException:
+ if updated:
+  with tempfile.TemporaryDirectory(prefix='agora-agent-restore-') as temporary:
+   for disk,key in updated:
+    run('mount','-o','loop,rw,nosuid,nodev,noexec',str(disk),temporary)
+    try:shutil.copyfile(backup/(key+'-runner.py'),Path(temporary)/'usr/local/lib/agora-runner.py');run('sync','-f',temporary)
+    finally:run('umount',temporary)
+ if (backup/'manager.py').exists():shutil.copy2(backup/'manager.py',manager)
+ raise
+finally:run('systemctl','start','agora-runtime-manager.service')

@@ -4,6 +4,7 @@
 Each request is a bounded JSON line; responses are bounded JSON lines. Code runs
 as persistent unprivileged language kernels in a bounded, idle-frozen cgroup.
 """
+import codecs
 import base64
 import ctypes
 import functools
@@ -34,8 +35,9 @@ LANGUAGES = {'python': ('python3',), 'javascript': ('node',),
 
 
 def validate(request):
-    if not isinstance(request, dict) or not {'language', 'code'} <= set(request) or set(request) - {'language', 'code', 'runtime', 'pythonRuntime', 'stdin'}:
+    if not isinstance(request, dict) or not {'language', 'code'} <= set(request) or set(request) - {'language', 'code', 'runtime', 'pythonRuntime', 'stdin', 'action'}:
         raise ValueError('Expected language and code')
+    if request.get('action','execute') not in ('execute','build'): raise ValueError('Invalid action')
     language, code = request['language'], request['code']
     if language not in LANGUAGES or not isinstance(code, str) or len(code.encode('utf-8')) > MAX_CODE:
         raise ValueError('Unsupported language or code too large')
@@ -114,7 +116,9 @@ def worker_command(language, config, fd, python_runtime=None):
     if language in ('python','bash'):
         selected=config if language=='python' else options.normalize('python',python_runtime)
         env=options.python_environment(selected['engine'],env)
-    if language == 'python':
+    if config['executionMode']=='precompiled':
+        command=['/usr/local/bin/python3.12','-u','/usr/local/lib/artifact_worker.py',fd,language,json.dumps(config)]
+    elif language == 'python':
         command = [python, '-u']
         if config['optimize'] != '0': command += ['-O' if config['optimize']=='1' else '-OO']
         if not config['writeBytecode']: command += ['-B']
@@ -218,7 +222,7 @@ def install_java_dependencies(config):
     return result
 
 
-def execute(request):
+def execute(request, on_output=None):
     if isinstance(request,dict) and set(request)=={'action','runtime'} and request['action']=='java_dependencies':
         return install_java_dependencies(request['runtime'])
     if request == {'action': 'reset'}:
@@ -231,7 +235,18 @@ def execute(request):
     config=options.normalize(language,request.get('runtime'))
     if language=='java' and config['dependencies'] and not Path(options.java_dependency_path(config)).is_file():
         return {'exitCode':1,'output':'실행 환경에서 Java 라이브러리를 먼저 설치하세요.','timedOut':False,'truncated':False,'environmentReset':False}
+    if request.get('action')=='build' and config['executionMode']!='precompiled':
+        return {'exitCode':0,'output':'기존 실행 모드: 사전 빌드 대상이 아닙니다.','timedOut':False,'truncated':False,'environmentReset':False}
     output, reply = bytearray(), bytearray()
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    def collect(data):
+        available = MAX_OUTPUT - len(output)
+        accepted = data[:available]
+        output.extend(accepted)
+        if on_output:
+            text = decoder.decode(accepted)
+            if text: on_output(text)
+        return len(data) > available
     timed_out = truncated = False
     environment_reset = False
     status = 1
@@ -247,7 +262,9 @@ def execute(request):
         os.lseek(input_fd, 0, os.SEEK_SET)
         (group / 'cgroup.freeze').write_text('0')
         os.set_blocking(process.stdout.fileno(), False)
-        if language == 'bash':
+        if config['executionMode']=='precompiled':
+            payload=json.dumps({'code':code,'stdinProvided':'stdin' in request,'action':request.get('action','execute')},ensure_ascii=True).encode()+b'\n'
+        elif language == 'bash':
             encoded = base64.b64encode(code.encode()).decode()
             child_fd = next(fd for fd in os.listdir(f'/proc/{process.pid}/fd')
                             if int(fd) > 2 and os.readlink(f'/proc/{process.pid}/fd/{fd}').startswith('socket:'))
@@ -262,7 +279,7 @@ def execute(request):
         control.sendall(payload)
         selector.register(process.stdout, selectors.EVENT_READ, 'output')
         selector.register(control, selectors.EVENT_READ, 'control')
-        deadline = time.monotonic() + TIMEOUT
+        deadline = time.monotonic() + (60 if request.get('action')=='build' else TIMEOUT)
         while not reply.endswith(b'\n'):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -277,9 +294,7 @@ def execute(request):
                     if len(reply) > 1024:
                         raise OSError('Invalid kernel response')
                 else:
-                    available = MAX_OUTPUT - len(output)
-                    output.extend(data[:available])
-                    if len(data) > available:
+                    if collect(data):
                         truncated = True
                         break
             if truncated:
@@ -309,9 +324,7 @@ def execute(request):
                     break
                 if not data:
                     break
-                available = MAX_OUTPUT - len(output)
-                output.extend(data[:available])
-                if len(data) > available:
+                if collect(data):
                     truncated = True
                     break
         else:
@@ -323,6 +336,9 @@ def execute(request):
         if timed_out or truncated or environment_reset:
             reset()
             environment_reset = True
+    if on_output:
+        tail = decoder.decode(b'', final=True)
+        if tail: on_output(tail)
     # The hypervisor may stop on idle or an operator restart. Commit guest file
     # writes (including pip installations) before acknowledging the completed cell.
     os.sync()
@@ -350,7 +366,16 @@ def serve():
                     data.extend(part)
                 if len(data) > MAX_CODE * 12 + 2048:
                     raise ValueError('Request too large')
-                result = execute(json.loads(data))
+                request = json.loads(data)
+                stream = request.pop('stream', False) if isinstance(request, dict) else False
+                if type(stream) is not bool: raise ValueError('Invalid stream flag')
+                disconnected = False
+                def send_output(text):
+                    nonlocal disconnected
+                    if disconnected: return
+                    try: conn.sendall(json.dumps({'type':'output','output':text}, ensure_ascii=True).encode()+b'\n')
+                    except OSError: disconnected = True
+                result = execute(request, on_output=send_output) if stream else execute(request)
             except (ValueError, TypeError, OSError, json.JSONDecodeError):
                 traceback.print_exc()
                 result = {'error': 'Execution unavailable or invalid request'}

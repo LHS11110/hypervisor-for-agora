@@ -33,6 +33,11 @@ CATALOG = {
   'defaults':{'engine':'bash52','errexit':False,'nounset':False,'pipefail':False},
   'fields':{'errexit':toggle('명령 실패 시 종료 (-e)'),'nounset':toggle('미정의 변수 사용 시 종료 (-u)'),'pipefail':toggle('파이프라인 실패 감지')}},
 }
+# Explicit build/run separation; legacy settings retain persistent kernels.
+for language, entry in CATALOG.items():
+ entry['defaults']['executionMode']='interactive'
+ entry['fields']['executionMode']={**select('실행 방식',['interactive','precompiled']), 'labels':{'interactive':'기존 실행 · 환경 유지','precompiled':'사전 빌드 후 실행'}}
+
 PYTHON = {'py311':'/opt/python/3.11/bin/python3.11','py312':'/usr/local/bin/python3.12','py313':'/opt/python/3.13/bin/python3.13','py314':'/opt/python/3.14/bin/python3.14','py315':'/opt/python/3.15/bin/python3.15'}
 NODE = {'node20':'/usr/bin/node','node22':'/opt/node/22/bin/node','node24':'/opt/node/24/bin/node'}
 JDK = {f'jdk{version}':f'/opt/jdk/{version}' for version in (17,21,25)}

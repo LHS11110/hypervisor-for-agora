@@ -150,7 +150,7 @@ def prepare(canvas_id):
     return directory / 'vsock'
 
 
-def exchange(path, request, response_timeout=23):
+def exchange(path, request, response_timeout=23, on_output=None):
     deadline = time.monotonic() + 25
     while True:
         sent = False
@@ -165,10 +165,20 @@ def exchange(path, request, response_timeout=23):
                     raise OSError('Guest not ready')
                 sent = True
                 conn.sendall(json.dumps(request, ensure_ascii=True).encode() + b'\n')
-                response = reader.readline(MAX_RESPONSE + 1)
-                if not response.endswith(b'\n') or len(response) > MAX_RESPONSE:
-                    raise Unavailable('Invalid guest response')
-                return json.loads(response)
+                output_bytes = 0
+                while True:
+                    response = reader.readline(MAX_RESPONSE + 1)
+                    if not response.endswith(b'\n') or len(response) > MAX_RESPONSE:
+                        raise Unavailable('Invalid guest response')
+                    frame = json.loads(response)
+                    if request.get('stream') is True and isinstance(frame,dict) and frame.get('type') == 'output':
+                        text = frame.get('output')
+                        if not isinstance(text, str): raise Unavailable('Invalid output frame')
+                        output_bytes += len(text.encode())
+                        if output_bytes > 65536 * 3: raise Unavailable('Output stream too large')
+                        if on_output is not None: on_output(text)
+                    else:
+                        return frame
         except (ConnectionRefusedError, FileNotFoundError, OSError) as error:
             if sent:
                 raise Unavailable('Guest connection lost during execution') from error
@@ -227,17 +237,19 @@ def delete_runtime(canvas_id):
     return {'deleted':True}
 
 
-def execute(request):
+def execute(request, on_output=None):
     if not isinstance(request,dict): raise ValueError('Invalid request')
     canvas_id=request.get('canvasId')
     if type(canvas_id) is not int or not 0<canvas_id<=2147483647: raise ValueError('Invalid canvas')
+    stream=request.get('stream',False)
+    if type(stream) is not bool: raise ValueError('Invalid stream flag')
     action=request.get('action','execute')
-    shapes={'execute':{'canvasId','language','code'},'reset':{'canvasId','action'},'delete':{'canvasId','action'},'java_dependencies':{'canvasId','action'},
+    shapes={'build':{'canvasId','action','language','code'},'execute':{'canvasId','language','code'},'reset':{'canvasId','action'},'delete':{'canvasId','action'},'java_dependencies':{'canvasId','action'},
             'resources_set':{'canvasId','action','template','revision'},
             'disk_set':{'canvasId','action','sizeGiB','revision'},
             'settings_get':{'canvasId','action'},'settings_set':{'canvasId','action','language','config','revision'}}
-    if action not in shapes or set(request) - ({'stdin'} if action=='execute' else set()) != shapes[action]: raise ValueError('Invalid request')
-    if action=='execute':
+    if action not in shapes or set(request) - ({'stdin','stream'} if action=='execute' else set()) != shapes[action]: raise ValueError('Invalid request')
+    if action in ('execute','build'):
         if 'stdin' in request and (not isinstance(request['stdin'],str) or len(request['stdin'].encode())>65536): raise ValueError('Invalid stdin')
         language,code=request['language'],request['code']
         if language not in options.CATALOG or not isinstance(code,str) or len(code.encode())>65536: raise ValueError('Invalid code')
@@ -308,7 +320,12 @@ def execute(request):
         payload={'action':'reset'} if action=='reset' else {'language':language,'code':code,'runtime':settings(canvas_id)['languages'][language]}
         if action=='execute' and 'stdin' in request:payload['stdin']=request['stdin']
         if action=='execute' and language=='bash':payload['pythonRuntime']=settings(canvas_id)['languages']['python']
-        result=exchange(prepare(canvas_id),payload)
+        if action=='build':payload['action']='build'
+        if stream:
+            payload['stream'] = True
+            result=exchange(prepare(canvas_id),payload,on_output=on_output)
+        else:
+            result=exchange(prepare(canvas_id),payload,response_timeout=70) if action=='build' else exchange(prepare(canvas_id),payload)
         with guard: last_used[canvas_id]=time.monotonic()
         return result
     finally: lock.release()
@@ -340,7 +357,16 @@ class Handler(socketserver.StreamRequestHandler):
             data = self.rfile.readline(MAX_REQUEST + 1)
             if len(data) > MAX_REQUEST or not data.endswith(b'\n'):
                 raise ValueError('Invalid request')
-            result = execute(json.loads(data))
+            request = json.loads(data)
+            disconnected = False
+            def send_output(text):
+                nonlocal disconnected
+                if disconnected: return
+                try:
+                    self.wfile.write(json.dumps({'type':'output','output':text}, ensure_ascii=True).encode()+b'\n')
+                    self.wfile.flush()
+                except OSError: disconnected = True
+            result = execute(request, on_output=send_output) if isinstance(request,dict) and request.get('stream') is True else execute(request)
         except (ValueError, TypeError) as error:
             result = {'error':'RUNTIME_CONFIG_INVALID','message':str(error)[:240]}
         except (OSError, subprocess.SubprocessError, Unavailable):

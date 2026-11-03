@@ -38,7 +38,7 @@ COPY --from=jdk25 /opt/java/openjdk /opt/jdk/25
 COPY --from=jdk17 /tmp/java-worker /opt/agora/java
 COPY --from=native-builder /tmp/agora-native-worker /usr/local/bin/agora-native-worker
 COPY --from=native-builder /tmp/agora-native-worker-21 /usr/local/bin/agora-native-worker-21
-COPY runner.py python_worker.py javascript_worker.cjs program_worker.py java_dependencies.py python_tool.py runtime_options.py /usr/local/lib/
+COPY artifact_worker.py cached_javascript.cjs runner.py python_worker.py javascript_worker.cjs program_worker.py java_dependencies.py python_tool.py runtime_options.py /usr/local/lib/
 RUN mv /usr/local/lib/runner.py /usr/local/lib/agora-runner.py
 COPY init /usr/local/sbin/agora-init
 RUN chmod 0755 /usr/local/sbin/agora-init && chmod 0644 /usr/local/lib/*worker* /usr/local/lib/agora-runner.py
