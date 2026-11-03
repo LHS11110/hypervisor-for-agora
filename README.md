@@ -151,9 +151,10 @@ VM에서 호스트의 공개 프록시를 이용해야 한다면 같은 파일�
 그 프록시의 **공인 IPv4 주소**를 추가합니다. 예:
 
 ```json
-{"blocked_ipv4": ["118.34.144.201/32"], "public_https_ipv4": ["118.34.144.201"]}
+{"blocked_ipv4": ["203.0.113.10/32"], "public_https_ipv4": ["203.0.113.10"]}
 ```
 
+위 주소는 문서 전용 예시이므로 실제 프록시의 공인 IP로 교체해야 합니다.
 이 예외는 공개 주소의 TCP 443만 호스트 업링크의 HTTPS 프록시로 전달합니다.
 원래 목적지와 conntrack 상태를 검사하며 SSH·80·내부 서비스 주소 및 VM으로의
 새 인바운드 연결은 허용하지 않습니다. 프록시의 도메인과 인증서는 그대로 검증합니다.
@@ -168,7 +169,13 @@ sudo python3 -I /usr/local/lib/agora-hypervisor/runtime-network.py up 2102
 허용되어 있어도 해당 호스트의 공개 다운로드/API는 연결되지 않습니다.
 공인 주소가 변경되면 차단 목록과 HTTPS 예외 목록을 함께 갱신하세요.
 `runtime/tests/public_https_integration.py`는 실제 VM에서 모듈 다운로드·pip 설치·
-SDK 호출과 내부 주소/다른 포트 차단을 확인합니다.
+SDK 호출과 내부 주소/다른 포트 차단을 확인합니다. 실행 전에
+`AGORA_TEST_PUBLIC_IPV4`, `AGORA_TEST_HOST_IPV4`, `AGORA_TEST_WHEEL_URL`을
+배포 환경에 맞게 지정합니다. wheel URL은 인증 정보가 없는 HTTPS 주소여야 합니다.
+`runtime/tests/network_integration.py`에도 `AGORA_TEST_HOST_IPV4`가 필요합니다.
+실제 주소와 도메인은 저장소에 기록하지 말고 무시되는 로컬 환경 파일이나 실행 환경에서
+관리하세요. VM 내부 주소, 차단 대역, 루프백 및 공개 DNS 주소는 네트워크 동작에
+필요한 공통 설정이며 배포 호스트의 주소가 아닙니다.
 
 마지막 명령은 `project-orchestra` 디렉터리에서 실행합니다. 운영 배포는
 `development` 대신 `production`을 사용합니다. `--runtime`은 미리 설치된 관리자

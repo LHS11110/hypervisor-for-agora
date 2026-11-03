@@ -38,13 +38,13 @@ class NetworkTests(unittest.TestCase):
 
     def test_public_https_only_reaches_the_proxy_and_only_allows_reply_traffic(self):
         calls=[];result=type('Result',(),{'returncode':0})()
-        with patch.object(network,'public_https',return_value=['118.34.144.201']), patch.object(network,'ingress_address',return_value='172.30.1.71'), patch.object(network,'uplink',return_value='eth0'), patch.object(network,'blocked_networks',return_value=[*network.BLOCKED,'118.34.144.201/32']), patch.object(network,'ipt',return_value=result), patch.object(network,'ensure_rule'), patch.object(network,'call',side_effect=lambda *args,**kwargs:calls.append((args,kwargs))):
+        with patch.object(network,'public_https',return_value=['203.0.113.10']), patch.object(network,'ingress_address',return_value='192.168.100.10'), patch.object(network,'uplink',return_value='eth0'), patch.object(network,'blocked_networks',return_value=[*network.BLOCKED,'203.0.113.10/32']), patch.object(network,'ipt',return_value=result), patch.object(network,'ensure_rule'), patch.object(network,'call',side_effect=lambda *args,**kwargs:calls.append((args,kwargs))):
             network.firewall_up()
         text=next(kwargs['input'] for args,kwargs in calls if args[0]=='iptables-restore')
-        self.assertIn('--dport 443 -j DNAT --to-destination 172.30.1.71:443',text)
-        self.assertIn('--ctorigdst 118.34.144.201 --ctorigdstport 443 --ctstate NEW,ESTABLISHED',text)
-        self.assertIn('--sport 443 -m conntrack --ctorigdst 118.34.144.201 --ctorigdstport 443 --ctstate ESTABLISHED',text)
-        self.assertIn('-i agv+ -d 118.34.144.201/32 -j DROP',text)
+        self.assertIn('--dport 443 -j DNAT --to-destination 192.168.100.10:443',text)
+        self.assertIn('--ctorigdst 203.0.113.10 --ctorigdstport 443 --ctstate NEW,ESTABLISHED',text)
+        self.assertIn('--sport 443 -m conntrack --ctorigdst 203.0.113.10 --ctorigdstport 443 --ctstate ESTABLISHED',text)
+        self.assertIn('-i agv+ -d 203.0.113.10/32 -j DROP',text)
         self.assertNotIn('--dport 80 ',text)
         self.assertNotIn('-F INPUT',text)
 
@@ -52,7 +52,7 @@ class NetworkTests(unittest.TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as directory:
             config=Path(directory)/'network.json'
-            for address in ['127.0.0.1','172.30.1.71','10.205.0.2','0.0.0.0','169.254.169.254']:
+            for address in ['127.0.0.1','192.168.100.10','10.205.0.2','0.0.0.0','169.254.169.254']:
                 config.write_text(__import__('json').dumps({'public_https_ipv4':[address]}))
                 with patch.object(network,'CONFIG',config):
                     with self.assertRaises(ValueError):network.public_https()

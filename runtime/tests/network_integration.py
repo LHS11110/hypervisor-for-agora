@@ -4,6 +4,7 @@
 Checks real DNS/TLS/pip, persistent packages, blocked host/private destinations,
 and blocked unsolicited connections to a listening guest from host/another netns.
 """
+import ipaddress
 import json
 import os
 import shutil
@@ -34,6 +35,7 @@ def request(code):
 
 def main():
     if os.geteuid() != 0: raise SystemExit('Run as root')
+    host_address = str(ipaddress.IPv4Address(os.environ['AGORA_TEST_HOST_IPV4']))
     assert not DIRECTORY.exists(), 'Only use an unused temporary VM'
     assert not Path('/run/netns', ATTACKER).exists(), 'Test namespace already exists'
     assert not json.loads(command('ip', '-j', 'route', 'show', 'exact', '10.205.0.2/32').stdout), 'Test route already exists'
@@ -46,8 +48,8 @@ def main():
         assert 'Successfully installed six-1.17.0' in output, output
         assert request('import six\nprint(six.__version__)\nprint(six.__file__)').strip().endswith('/workspace/.python/six.py')
         print('PASS: pip installs to writable persistent workspace and Python imports package', flush=True)
-        output = request('''import socket
-for host,port in [("10.205.0.1",443),("172.30.1.71",443),("169.254.169.254",80),("10.204.0.2",8765)]:
+        output = request('import socket\nhost_address=' + repr(host_address) + '''
+for host,port in [("10.205.0.1",443),(host_address,443),("169.254.169.254",80),("10.204.0.2",8765)]:
  try:
   connection=socket.create_connection((host,port),timeout=1.5)
   connection.close()
