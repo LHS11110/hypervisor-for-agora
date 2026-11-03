@@ -10,7 +10,8 @@ cache.mkdir(parents=True,exist_ok=True)
 for line in control.makefile('rb'):
  status=1
  try:
-  code=json.loads(line)['code']
+  request=json.loads(line)
+  code=request['code']
   digest=hashlib.sha256(code.encode()).hexdigest()
   binary=cache/digest
   if not binary.exists():
@@ -20,7 +21,9 @@ for line in control.makefile('rb'):
    status=compiled.returncode
    if status==0:os.replace(str(binary)+'.next',binary)
   else:status=0
-  if status==0:status=subprocess.run([str(binary)],stdin=subprocess.DEVNULL).returncode
+  if status==0:
+   source='/proc/self/fd/'+os.environ['AGORA_STDIN_FD'] if request.get('stdinProvided') and 'AGORA_STDIN_FD' in os.environ else '/dev/null'
+   with open(source,'rb') as input_stream:status=subprocess.run([str(binary)],stdin=input_stream).returncode
  except BaseException:
   traceback.print_exc();status=1
  sys.stdout.flush();sys.stderr.flush()

@@ -12,6 +12,11 @@ class RequestValidationTests(unittest.TestCase):
         for language in ('python', 'javascript', 'bash', 'c', 'cpp', 'java'):
             self.assertEqual(runner.validate({'language': language, 'code': 'example'}), (language, 'example'))
 
+    def test_stdin_is_optional_bounded_utf8_text(self):
+        self.assertEqual(runner.validate({'language':'python','code':'input()','stdin':'한글\n'}),('python','input()'))
+        for value in [None, 123, '한'*22000]:
+            with self.assertRaises(ValueError):runner.validate({'language':'python','code':'','stdin':value})
+
     def test_rejects_unknown_language_extra_fields_and_large_utf8(self):
         for request in ({'language': 'ruby', 'code': ''},
                         {'language': 'bash', 'code': '', 'command': 'unexpected'},

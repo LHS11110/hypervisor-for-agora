@@ -19,7 +19,7 @@ _spec.loader.exec_module(options)
 STATE = Path('/var/lib/agora-runtime')
 CANVASES = STATE / 'canvases'
 SOCKET = Path('/run/agora-runtime/manager.sock')
-MAX_REQUEST = 400000
+MAX_REQUEST = 800000
 MAX_RESPONSE = 400000
 MAX_ACTIVE = 4
 MAX_VM_MEMORY_MIB = 8192
@@ -236,8 +236,9 @@ def execute(request):
             'resources_set':{'canvasId','action','template','revision'},
             'disk_set':{'canvasId','action','sizeGiB','revision'},
             'settings_get':{'canvasId','action'},'settings_set':{'canvasId','action','language','config','revision'}}
-    if action not in shapes or set(request)!=shapes[action]: raise ValueError('Invalid request')
+    if action not in shapes or set(request) - ({'stdin'} if action=='execute' else set()) != shapes[action]: raise ValueError('Invalid request')
     if action=='execute':
+        if 'stdin' in request and (not isinstance(request['stdin'],str) or len(request['stdin'].encode())>65536): raise ValueError('Invalid stdin')
         language,code=request['language'],request['code']
         if language not in options.CATALOG or not isinstance(code,str) or len(code.encode())>65536: raise ValueError('Invalid code')
     elif action=='settings_set':
@@ -305,6 +306,7 @@ def execute(request):
             return result
         if action=='reset' and not running(f'agora-runtime@{canvas_id}.service'): return {'reset':True}
         payload={'action':'reset'} if action=='reset' else {'language':language,'code':code,'runtime':settings(canvas_id)['languages'][language]}
+        if action=='execute' and 'stdin' in request:payload['stdin']=request['stdin']
         if action=='execute' and language=='bash':payload['pythonRuntime']=settings(canvas_id)['languages']['python']
         result=exchange(prepare(canvas_id),payload)
         with guard: last_used[canvas_id]=time.monotonic()

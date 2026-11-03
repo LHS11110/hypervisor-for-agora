@@ -13,6 +13,8 @@ const reader = readline.createInterface({ input: fs.createReadStream(null, { fd:
 (async () => {
   for await (const line of reader) {
     let exitCode = 0;
+    // A fresh readable avoids retaining EOF or unread chunks from the prior cell.
+    Object.defineProperty(process, 'stdin', { configurable: true, value: fs.createReadStream(null, {fd:0,autoClose:false}) });
     try { await new vm.Script((process.argv[3] === 'true' ? '"use strict";\n' : '') + JSON.parse(line).code, { filename: '/workspace/blueprint.js' }).runInContext(context); }
     catch (error) { console.error(error.stack || String(error)); exitCode = 1; }
     // Drain both output streams before acknowledging this cell.

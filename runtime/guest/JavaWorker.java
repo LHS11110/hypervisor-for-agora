@@ -33,7 +33,11 @@ public class JavaWorker {
             while((line=input.readLine())!=null) {
                 int status=0;
                 try {
-                    String source=new String(Base64.getDecoder().decode(line),StandardCharsets.UTF_8);
+                    String[] fields=line.split(" ",2);
+                    String inputFd=System.getenv("AGORA_STDIN_FD");
+                    String inputPath=fields.length>1&&fields[1].equals("1")&&inputFd!=null?"/proc/self/fd/"+inputFd:"/dev/null";
+                    System.setIn(new FileInputStream(inputPath));
+                    String source=new String(Base64.getDecoder().decode(fields[0]),StandardCharsets.UTF_8);
                     while(!source.isBlank()&&status==0) {
                         var completion=shell.sourceCodeAnalysis().analyzeCompletion(source);
                         String snippet=completion.source();
@@ -54,6 +58,7 @@ public class JavaWorker {
                         source=completion.remaining();
                     }
                 } catch(Throwable error) {error.printStackTrace(System.err);status=1;}
+                System.in.close();
                 System.out.flush();System.err.flush();
                 control.write(("{\"exitCode\":"+status+"}\n").getBytes(StandardCharsets.US_ASCII));control.flush();
             }

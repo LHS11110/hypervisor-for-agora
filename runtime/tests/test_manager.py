@@ -18,6 +18,15 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 manager.execute(request)
 
+    def test_stdin_is_forwarded_and_invalid_inputs_never_boot_vm(self):
+        for value in [None, 5, '한'*22000]:
+            with patch.object(manager,'prepare') as prepare:
+                with self.assertRaises(ValueError):manager.execute({'canvasId':123,'language':'python','code':'input()','stdin':value})
+                prepare.assert_not_called()
+        with patch.object(manager,'prepare',return_value='vsock'), patch.object(manager,'settings',return_value={'languages':{'python':{}}}), patch.object(manager,'exchange',return_value={'exitCode':0}) as exchange:
+            manager.execute({'canvasId':123,'language':'python','code':'input()','stdin':'one\ntwo\n'})
+            self.assertEqual(exchange.call_args.args[1]['stdin'],'one\ntwo\n')
+
     def test_reset_does_not_boot_an_inactive_canvas(self):
         with patch.object(manager, 'running', return_value=False), patch.object(manager, 'prepare') as prepare:
             self.assertEqual(manager.execute({'canvasId': 123, 'action': 'reset'}), {'reset': True})

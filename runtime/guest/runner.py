@@ -34,11 +34,13 @@ LANGUAGES = {'python': ('python3',), 'javascript': ('node',),
 
 
 def validate(request):
-    if not isinstance(request, dict) or not {'language', 'code'} <= set(request) or set(request) - {'language', 'code', 'runtime', 'pythonRuntime'}:
+    if not isinstance(request, dict) or not {'language', 'code'} <= set(request) or set(request) - {'language', 'code', 'runtime', 'pythonRuntime', 'stdin'}:
         raise ValueError('Expected language and code')
     language, code = request['language'], request['code']
     if language not in LANGUAGES or not isinstance(code, str) or len(code.encode('utf-8')) > MAX_CODE:
         raise ValueError('Unsupported language or code too large')
+    if 'stdin' in request and (not isinstance(request['stdin'], str) or len(request['stdin'].encode()) > 65536):
+        raise ValueError('Invalid stdin')
     options.normalize(language, request.get('runtime'))
     if 'pythonRuntime' in request:
         if language!='bash':raise ValueError('Python tool configuration is only allowed for Shell')
@@ -64,9 +66,12 @@ def _restrict(group):
 # One kernel per language, shared by every participant in this canvas VM.
 kernels = {}
 kernel_configs = {}
+kernel_inputs = {}
 
 
 def stop_kernel(language):
+    input_fd = kernel_inputs.pop(language, None)
+    if input_fd is not None: os.close(input_fd)
     entry = kernels.pop(language, None)
     kernel_configs.pop(language, None)
     group = CGROUP / language
@@ -169,15 +174,19 @@ def kernel(language, config=None, python_runtime=None):
     parent, child = socket.socketpair()
     fd = str(child.fileno())
     command, env = worker_command(language, config, fd, python_runtime)
+    input_fd = os.memfd_create("agora-stdin", os.MFD_CLOEXEC)
+    env["AGORA_STDIN_FD"] = str(input_fd)
     try:
-        process = subprocess.Popen(command, cwd=WORKSPACE, stdin=child if language == 'bash' else subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, pass_fds=(child.fileno(),),
+        process = subprocess.Popen(command, cwd=WORKSPACE, stdin=child if language == 'bash' else input_fd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, pass_fds=(child.fileno(),input_fd),
             env=env, preexec_fn=functools.partial(_restrict, group))
     except BaseException:
         parent.close()
+        os.close(input_fd)
         raise
     finally:
         child.close()
+    kernel_inputs[language] = input_fd
     kernel_configs[language] = config
     kernels[language] = (process, parent)
     return process, parent
@@ -230,6 +239,12 @@ def execute(request):
     try:
         process, control = kernel(language, request.get('runtime'), request.get('pythonRuntime'))
         group = CGROUP / language
+        input_fd = kernel_inputs[language]
+        os.ftruncate(input_fd, 0)
+        os.lseek(input_fd, 0, os.SEEK_SET)
+        data = request.get('stdin', '').encode()
+        if data: os.write(input_fd, data)
+        os.lseek(input_fd, 0, os.SEEK_SET)
         (group / 'cgroup.freeze').write_text('0')
         os.set_blocking(process.stdout.fileno(), False)
         if language == 'bash':
@@ -238,11 +253,12 @@ def execute(request):
                             if int(fd) > 2 and os.readlink(f'/proc/{process.pid}/fd/{fd}').startswith('socket:'))
             engine=options.normalize('python',request.get('pythonRuntime'))['engine']
             prelude=f'eval "$(/usr/local/bin/python3.12 -I /usr/local/lib/python_tool.py --environment {engine})"\n'
-            payload = (prelude+f"eval -- \"$(printf '%s' '{encoded}' | base64 -d)\"\nbuiltin printf '{{\"exitCode\":%d}}\\n' \"$?\" >&{child_fd}\n").encode()
+            input_source = f'/proc/self/fd/{input_fd}' if 'stdin' in request else '/dev/null'
+            payload = (prelude+f"eval -- \"$(printf '%s' '{encoded}' | base64 -d)\" <{input_source}\nbuiltin printf '{{\"exitCode\":%d}}\\n' \"$?\" >&{child_fd}\n").encode()
         elif language == 'java':
-            payload = base64.b64encode(code.encode()) + b'\n'
+            payload = base64.b64encode(code.encode()) + (b' 1' if 'stdin' in request else b' 0') + b'\n'
         else:
-            payload = json.dumps({'code': code}, ensure_ascii=True).encode() + b'\n'
+            payload = json.dumps({'code': code, 'stdinProvided': 'stdin' in request}, ensure_ascii=True).encode() + b'\n'
         control.sendall(payload)
         selector.register(process.stdout, selectors.EVENT_READ, 'output')
         selector.register(control, selectors.EVENT_READ, 'control')
@@ -327,12 +343,12 @@ def serve():
                 if peer[0] != socket.VMADDR_CID_HOST:
                     continue
                 data = bytearray()
-                while not data.endswith(b'\n') and len(data) <= MAX_CODE * 6 + 1024:
+                while not data.endswith(b'\n') and len(data) <= MAX_CODE * 12 + 2048:
                     part = conn.recv(4096)
                     if not part:
                         raise ValueError('Incomplete request')
                     data.extend(part)
-                if len(data) > MAX_CODE * 6 + 1024:
+                if len(data) > MAX_CODE * 12 + 2048:
                     raise ValueError('Request too large')
                 result = execute(json.loads(data))
             except (ValueError, TypeError, OSError, json.JSONDecodeError):

@@ -17,6 +17,8 @@
 #include <unistd.h>
 #include <cstdio>
 #include <iostream>
+#include <cstdlib>
+#include <ext/stdio_sync_filebuf.h>
 
 int main(int argc, char **argv) {
   if (argc < 3) return 2;
@@ -70,6 +72,15 @@ int main(int argc, char **argv) {
     if (!request) { llvm::consumeError(request.takeError()); return 2; }
     auto code = request->getAsObject()->getString("code");
     if (!code) return 2;
+    // Every cell gets a fresh stream, including cached native code. Reset EOF and
+    // buffering without discarding declarations, globals or compiled entry points.
+    const char *inputFd = std::getenv("AGORA_STDIN_FD");
+    bool provided = request->getAsObject()->getBoolean("stdinProvided").value_or(false);
+    std::string inputPath = provided && inputFd ? std::string("/proc/self/fd/") + inputFd : "/dev/null";
+    if (!freopen(inputPath.c_str(), "r", stdin)) return 2;
+    __gnu_cxx::stdio_sync_filebuf<char> inputBuffer(stdin);
+    auto *previousInput = std::cin.rdbuf(&inputBuffer);
+    std::cin.clear(); clearerr(stdin);
     std::string source = code->str();
     auto previous = cells.find(source);
     if (previous != cells.end()) {
@@ -191,6 +202,7 @@ int main(int argc, char **argv) {
       char name[] = "blueprint"; char *args[] = {name, nullptr};
       status = previous->second.main(1, args);
     }
+    std::cin.rdbuf(previousInput); std::cin.clear();
     std::cout.flush(); std::cerr.flush(); fflush(nullptr);
     std::string response = "{\"exitCode\":" + std::to_string(status) + ",\"compileCount\":" + std::to_string(compileCount) + "}\n";
     if (write(fd, response.data(), response.size()) != static_cast<ssize_t>(response.size())) return 2;
