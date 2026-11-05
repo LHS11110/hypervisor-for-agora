@@ -69,6 +69,7 @@ def _restrict(group):
 kernels = {}
 kernel_configs = {}
 kernel_inputs = {}
+notebooks = None
 
 
 def stop_kernel(language):
@@ -93,6 +94,7 @@ def stop_kernel(language):
 
 
 def reset():
+    if notebooks is not None: notebooks.stop()
     for language in list(kernels): stop_kernel(language)
     if CGROUP.exists():
         (CGROUP / 'cgroup.kill').write_text('1')
@@ -223,6 +225,13 @@ def install_java_dependencies(config):
 
 
 def execute(request, on_output=None):
+    global notebooks
+    if isinstance(request,dict) and request.get('action')=='notebook':
+        if notebooks is None:
+            import sys
+            spec=importlib.util.spec_from_file_location('agora_notebook',Path(__file__).with_name('notebook.py'));module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            notebooks=module.NotebookService(sys.modules[__name__])
+        return notebooks.handle(request)
     if isinstance(request,dict) and set(request)=={'action','runtime'} and request['action']=='java_dependencies':
         return install_java_dependencies(request['runtime'])
     if request == {'action': 'reset'}:
@@ -230,6 +239,7 @@ def execute(request, on_output=None):
     if isinstance(request,dict) and set(request)=={'action','language','runtime'} and request['action']=='configure':
         options.normalize(request['language'],request['runtime'])
         stop_kernel(request['language'])
+        if request['language']=='python' and notebooks is not None:notebooks.stop()
         return {'configured': True}
     language, code = validate(request)
     config=options.normalize(language,request.get('runtime'))
@@ -347,7 +357,28 @@ def execute(request, on_output=None):
             'timedOut': timed_out, 'truncated': truncated, 'environmentReset': environment_reset}
 
 
+def ensure_shared_memory():
+    """POSIX semaphores (joblib/multiprocessing) require a writable /dev/shm.
+
+    devtmpfs hides image directories at boot, so create and mount it afterwards.
+    The mount is private to this VM and bounded independently of its disk.
+    """
+    target=Path('/dev/shm')
+    target.mkdir(mode=0o1777,parents=True,exist_ok=True)
+    if not os.path.ismount(target):
+        subprocess.run(['mount','-t','tmpfs','-o','rw,nosuid,nodev,noexec,mode=1777,size=64m','tmpfs',str(target)],check=True)
+    os.chmod(target,0o1777)
+
+
 def serve():
+    ensure_shared_memory()
+    import threading
+    spec=importlib.util.spec_from_file_location('agora_packages',Path(__file__).with_name('package_manager.py'))
+    packages=importlib.util.module_from_spec(spec);spec.loader.exec_module(packages);packages.setup()
+    threading.Thread(target=packages.PackageService(resource_limits()).serve,daemon=True).start()
+    spec = importlib.util.spec_from_file_location('agora_terminal', Path(__file__).with_name('terminal.py'))
+    terminal = importlib.util.module_from_spec(spec); spec.loader.exec_module(terminal)
+    threading.Thread(target=terminal.TerminalService().serve, daemon=True).start()
     listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     listener.bind((socket.VMADDR_CID_ANY, 5000))
     listener.listen(8)

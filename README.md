@@ -482,3 +482,41 @@ sudo python3 runtime/tests/pip_alignment_integration.py
 `python3 runtime/tests/streaming_integration.py`는 예약 ID 2147483017의 독립 VM에서 6개 언어의 종료 전 출력과 최종 결과 일치를 확인하고 생성한 VM을 삭제합니다.
 
 `sudo runtime/update-agent`는 활성 VM이 없는 상태에서 runner.py와 manager.py만 갱신하는 소규모 업데이트용입니다. base 및 저장된 guest 이미지의 기존 OS·설치 패키지·workspace를 유지하며 이전 에이전트 파일을 별도 보관합니다. 컴파일러·라이브러리·언어 워커까지 변경하는 경우에는 전체 `prepare-guest`/`upgrade-guest` 절차를 사용해야 합니다.
+
+### 재부팅 후 Spring의 runtime bind mount
+
+`/run`은 재부팅하면 비워집니다. Docker가 Spring을 복원하기 전에 `/run/agora-runtime`이 존재하도록 `runtime/install`이 `/etc/tmpfiles.d/agora-runtime.conf`를 설치합니다. systemd 초기 부팅 단계에서 root:10001, 0710 권한으로 생성하며 manager는 같은 디렉터리에 소켓을 만듭니다. Docker를 manager 뒤로 직접 연결하면 egress의 Docker 의존성과 순환하므로 이 디렉터리는 tmpfiles로 먼저 준비합니다.
+
+기존 설치에도 적용하려면 `sudo install -m 0644 runtime/agora-runtime.tmpfiles.conf /etc/tmpfiles.d/agora-runtime.conf`와 `sudo systemd-tmpfiles --create /etc/tmpfiles.d/agora-runtime.conf`를 실행합니다. Docker/VM을 재시작할 필요는 없습니다. 이전 부팅에서 마운트 실패로 중지된 Spring은 Project Orchestra 운영 계획의 Spring 시작 단계를 다시 실행합니다.
+
+### 캔버스 VM 터미널
+
+터미널 객체는 VSOCK 5001의 호스트 전용 PTY 서비스로 연결됩니다. 명령 실행 채널(5000)과 별도로 동작하며 UID 1000, `/workspace`, 사용자별 셸, 입력/출력/윈도 크기 변경을 지원합니다. Python/pip는 캔버스에 선택한 Python 버전과 같은 패키지 경로를 사용합니다. 셸당 512MiB·128프로세스·1 CPU, VM당 8개 세션, 출력 버퍼 256KiB, 요청 없이 120초 후 정리 제한을 적용합니다. 외부 TCP 포트는 추가하지 않습니다.
+
+`runtime/install`은 게스트 에이전트 원본도 설치합니다. 중지된 VM은 다음 부팅 때 에이전트만 갱신하고 파일/패키지는 유지합니다. 구형 실행 중 VM에서 최초 터미널 연결을 요청하면 실행 요청이 진행 중이지 않을 때에만 VM을 갱신/재시작하므로, 메모리의 언어 실행 상태는 초기화될 수 있습니다. `runtime/update-agent`는 실행 중 VM이 없을 때 기존 이미지와 기본 이미지를 일괄 갱신합니다.
+
+검증: `python3 -m unittest discover -s runtime/tests -p 'test_*.py'`. 실제 KVM의 PTY, UID, 셸 상태 유지, Ctrl+C, resize, 사용자 분리와 Python 3.14/pip 버전 일치를 확인했습니다.
+
+### 터미널 지속 연결
+
+`terminal_attach` 관리 요청은 동일 Unix 연결을 유지해 VSOCK 5001에 입력/출력을 중계합니다. 32개 스트림 슬롯을 일반 코드 실행 슬롯 16개와 분리합니다. 게스트의 `attach` 프레임은 사용자/객체 바인딩을 고정하고 입력·resize·종료만 허용합니다. 출력은 절대 byte offset과 함께 push되며 느린 연결의 버퍼/쓰기 시간은 제한됩니다. WebSocket 계층의 티켓과 실행 권한 검사는 Spring에서 수행합니다.
+
+새 에이전트를 아직 부팅하지 않은 실행 중 VM은 내부 호환 중계로 처리해 강제 재시작을 피합니다. VM이 정상적으로 다시 부팅될 때 지속 연결 지원 에이전트로 갱신됩니다. 관리 프로세스가 재시작되더라도 게스트 셸은 유지되며 연결이 복구되면 같은 offset부터 다시 수신합니다. 브라우저는 이미 실행됐을 수 있는 입력을 재전송하지 않습니다.
+
+### Canvas Jupyter notebooks
+
+The canvas notebook object uses a real `jupyter_client`/IPython kernel inside the existing VM, with a canvas-native cell editor and isolated rich output display. It uses the authenticated Spring → manager Unix socket → guest VSOCK path; no Jupyter HTTP server or additional public port is required. Python 3.12 guest builds include the dependencies in `runtime/guest/Dockerfile`. Other selected Python environments can use the object's **환경 준비** action to install the pinned direct dependencies into that interpreter's workspace package directory.
+
+`runtime/install` installs `notebook.py` and `notebook_worker.py` with the existing agent updater. Existing active guests are retained on deployment. The first explicit prepare request can stop an outdated guest, apply the new agent, and restart with its `/workspace` and installed packages preserved. Prepare requires runtime-management permission; execution requires the notebook object's read/execute permissions. New agent files are applied automatically on a stopped guest's next boot. An optional prebuilt Python 3.12 bundle at `/usr/local/lib/agora-hypervisor/guest/notebook-py312` is copied by the updater into `/opt/agora/notebook-py312`; user-installed packages retain precedence.
+
+Each notebook has a persistent kernel and variables; the most recently used four kernels remain resident. A fifth evicts the least recently used kernel. VM restart, Python configuration changes and runtime reset clear kernels. Cells and stored rich results remain in the canvas. Cells run for at most 15 seconds, with bounded output and `allow_stdin=False`. Kernel processes run as workspace UID 1000 inside the existing job cgroup limits. HTML output is sandboxed by the frontend with scripts and network disabled.
+
+Root-only real-VM regression: `python3 runtime/tests/notebook_integration.py`. It uses a reserved test ID, refuses an existing disk and deletes only its own test VM. `runtime/tests/notebook_container.py` additionally exercises actual Jupyter kernels in a Python 3.12 container with `/packages`, `/work`, and a writable `/workspace` mount.
+
+### 일반 사용자 apt 패키지 설치
+
+캔버스 터미널에서 `apt update`, `apt install -y jq`, `apt-cache policy jq`, `jq --version`을 실행할 수 있습니다. 셸은 UID 1000과 `no_new_privs=1`을 유지하며, 게스트 내부의 제한된 패키지 서비스가 승인된 apt 작업만 수행합니다. sudo나 호스트 관리자 권한은 제공하지 않습니다. 임의 APT/DPkg 실행 훅과 로컬 deb 경로는 허용하지 않습니다.
+
+설치는 비대화식이며 저장된 패키지는 같은 캔버스 VM에서 공유되고 재시작 후에도 유지됩니다. 오래 걸리는 설치는 터미널을 사용하세요. 코드 객체의 실행 시간 제한은 그대로 적용됩니다. 공개 저장소 연결은 HTTPS를 사용하며 별도 외부 수신 포트를 열지 않습니다. 기존 실행 중 VM은 에이전트 적용을 위한 한 번의 재시작이 필요하며, 이때 파일은 유지되지만 실행 중 프로세스와 커널 변수는 초기화됩니다.
+
+검증: `python3 runtime/tests/apt_integration.py`는 전용 테스트 VM에서 사용자 권한 설치, 잘못된 관리자 옵션 거부와 재시작 후 패키지 유지를 확인한 뒤 테스트 VM만 삭제합니다.

@@ -38,7 +38,7 @@ COPY --from=jdk25 /opt/java/openjdk /opt/jdk/25
 COPY --from=jdk17 /tmp/java-worker /opt/agora/java
 COPY --from=native-builder /tmp/agora-native-worker /usr/local/bin/agora-native-worker
 COPY --from=native-builder /tmp/agora-native-worker-21 /usr/local/bin/agora-native-worker-21
-COPY artifact_worker.py cached_javascript.cjs runner.py python_worker.py javascript_worker.cjs program_worker.py java_dependencies.py python_tool.py runtime_options.py /usr/local/lib/
+COPY package_manager.py notebook.py notebook_worker.py terminal.py artifact_worker.py cached_javascript.cjs runner.py python_worker.py javascript_worker.cjs program_worker.py java_dependencies.py python_tool.py runtime_options.py /usr/local/lib/
 RUN mv /usr/local/lib/runner.py /usr/local/lib/agora-runner.py
 COPY init /usr/local/sbin/agora-init
 RUN chmod 0755 /usr/local/sbin/agora-init && chmod 0644 /usr/local/lib/*worker* /usr/local/lib/agora-runner.py
@@ -52,3 +52,6 @@ RUN mkdir -p /opt/agora/maven/repository /tmp/maven-warm \
 RUN chmod 0755 /usr/local/lib/python_tool.py \
     && mkdir -p /opt/agora/python-tools \
     && for tool in python python3 pip pip3 python3.11 python3.12 python3.13 python3.14 python3.15 pip3.11 pip3.12 pip3.13 pip3.14 pip3.15; do ln -s /usr/local/lib/python_tool.py /opt/agora/python-tools/$tool; done
+
+# Jupyter kernels and rich scientific output are available before first use.
+RUN python3 -m pip install --no-cache-dir jupyter-client==8.6.3 ipykernel==6.30.1 matplotlib==3.10.7 pandas==2.3.3

@@ -8,6 +8,11 @@ STATE=/var/lib/agora-runtime
 getent passwd agora-vmm >/dev/null
 for dependency in ip iptables iptables-restore sysctl; do command -v "$dependency" >/dev/null; done
 mkdir -p /run/netns
+# /run is volatile. Populate the Spring bind source during early boot, before
+# Docker restores containers. Waiting for the manager from Docker would cycle
+# through the egress service, which itself starts after Docker.
+install -m 0644 "$ROOT/runtime/agora-runtime.tmpfiles.conf" /etc/tmpfiles.d/agora-runtime.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/agora-runtime.conf
 install -m 0644 "$ROOT/runtime/network.py" /usr/local/lib/agora-hypervisor/runtime-network.py
 install -m 0644 "$ROOT/runtime/agora-runtime-egress.service" /etc/systemd/system/agora-runtime-egress.service
 install -m 0644 "$ROOT/runtime/agora-runtime-network@.service" /etc/systemd/system/agora-runtime-network@.service
@@ -21,6 +26,10 @@ mkdir -p "$STATE/canvases"
 chmod 0700 "$STATE" "$STATE/canvases"
 install -m 0644 "$STATE/vmlinuz" /usr/local/lib/agora-hypervisor/root/firmware/vmlinuz
 install -m 0644 "$ROOT/runtime/runtime_options.py" /usr/local/lib/agora-hypervisor/runtime_options.py
+install -d -m 0755 /usr/local/lib/agora-hypervisor/guest
+install -m 0644 "$ROOT/runtime/guest/runner.py" "$ROOT/runtime/guest/terminal.py" "$ROOT/runtime/guest/notebook.py" "$ROOT/runtime/guest/notebook_worker.py" "$ROOT/runtime/guest/package_manager.py" /usr/local/lib/agora-hypervisor/guest/
+install -m 0644 "$ROOT/runtime/agent_update.py" /usr/local/lib/agora-hypervisor/runtime-agent-update.py
+install -m 0644 "$ROOT/runtime/agora-runtime-agent@.service" /etc/systemd/system/agora-runtime-agent@.service
 install -m 0644 "$ROOT/runtime/manager.py" /usr/local/lib/agora-hypervisor/runtime-manager.py
 install -m 0644 "$ROOT/runtime/agora-runtime@.service" /etc/systemd/system/agora-runtime@.service
 install -m 0644 "$ROOT/runtime/agora-runtime-manager.service" /etc/systemd/system/agora-runtime-manager.service

@@ -1,0 +1,20 @@
+[Unit]
+Description=Update stopped Agora canvas guest agent %i
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/lib/agora-hypervisor/runtime-agent-update.py %i
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/agora-runtime
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=128M
+TasksMax=16
+LimitCORE=0

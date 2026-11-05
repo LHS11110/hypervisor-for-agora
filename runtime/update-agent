@@ -25,10 +25,23 @@ try:
     runner=mount/'usr/local/lib/agora-runner.py'
     shutil.copy2(runner,backup/(key+'-runner.py'))
     updated.append((disk,key))
+    extra=mount/'usr/local/lib/terminal.py'
+    if extra.exists():shutil.copy2(extra,backup/(key+'-terminal.py'))
+    for name in ('notebook.py','notebook_worker.py','package_manager.py'):
+     target=mount/'usr/local/lib'/name
+     if target.exists():shutil.copy2(target,backup/(key+'-'+name))
+     shutil.copyfile(root/'guest'/name,target);os.chmod(target,0o644)
+    shutil.copyfile(root/'guest/terminal.py',extra)
+    os.chmod(extra,0o644)
     shutil.copyfile(root/'guest/runner.py',runner)
     os.chmod(runner,0o644)
     run('sync','-f',str(mount))
    finally:run('umount',str(mount))
+ source=manager.parent/'guest';source.mkdir(exist_ok=True)
+ for name in ('runner.py','terminal.py','notebook.py','notebook_worker.py','package_manager.py'):shutil.copyfile(root/'guest'/name,source/name)
+ shutil.copyfile(root/'agent_update.py',manager.parent/'runtime-agent-update.py')
+ shutil.copyfile(root/'agora-runtime-agent@.service',Path('/etc/systemd/system/agora-runtime-agent@.service'))
+ run('systemctl','daemon-reload')
  shutil.copyfile(root/'manager.py',manager)
  os.chmod(manager,0o644)
  print('Updated runner in',len(updated),'offline images; workspace and installed packages retained.')
@@ -38,7 +51,16 @@ except BaseException:
   with tempfile.TemporaryDirectory(prefix='agora-agent-restore-') as temporary:
    for disk,key in updated:
     run('mount','-o','loop,rw,nosuid,nodev,noexec',str(disk),temporary)
-    try:shutil.copyfile(backup/(key+'-runner.py'),Path(temporary)/'usr/local/lib/agora-runner.py');run('sync','-f',temporary)
+    try:
+     shutil.copyfile(backup/(key+'-runner.py'),Path(temporary)/'usr/local/lib/agora-runner.py')
+     for name in ('notebook.py','notebook_worker.py','package_manager.py'):
+      target=Path(temporary)/'usr/local/lib'/name
+      if (backup/(key+'-'+name)).exists():shutil.copyfile(backup/(key+'-'+name),target)
+      else:target.unlink(missing_ok=True)
+     extra=Path(temporary)/'usr/local/lib/terminal.py'
+     if (backup/(key+'-terminal.py')).exists():shutil.copyfile(backup/(key+'-terminal.py'),extra)
+     else:extra.unlink(missing_ok=True)
+     run('sync','-f',temporary)
     finally:run('umount',temporary)
  if (backup/'manager.py').exists():shutil.copy2(backup/'manager.py',manager)
  raise

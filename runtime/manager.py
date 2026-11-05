@@ -7,6 +7,7 @@ import pwd
 import shutil
 import socket
 import socketserver
+import select
 import subprocess
 import threading
 import time
@@ -31,6 +32,8 @@ guard = threading.Lock()
 locks = {}
 last_used = {}
 slots = threading.BoundedSemaphore(16)
+terminal_slots = threading.BoundedSemaphore(32)
+request_slot = threading.local()
 
 
 class Unavailable(Exception):
@@ -116,6 +119,20 @@ def replace_disk(source, target, size):
         temporary.unlink(missing_ok=True)
 
 
+AGENT_SOURCE = Path('/usr/local/lib/agora-hypervisor/guest')
+
+def agent_version():
+    import hashlib
+    files=[AGENT_SOURCE/'runner.py',AGENT_SOURCE/'terminal.py',AGENT_SOURCE/'notebook.py',AGENT_SOURCE/'notebook_worker.py',AGENT_SOURCE/'package_manager.py']
+    if not all(path.is_file() for path in files):return None
+    return hashlib.sha256(b''.join(path.read_bytes() for path in files)).hexdigest()
+
+def refresh_agent(directory):
+    version=agent_version();marker=directory/'agent-version'
+    if not version or (marker.exists() and marker.read_text()==version):return
+    command('systemctl','start',f'agora-runtime-agent@{int(directory.name)}.service')
+    if not marker.exists() or marker.read_text()!=version:raise Unavailable('Guest agent update failed')
+
 def prepare(canvas_id):
     directory = CANVASES / str(canvas_id)
     unit = f'agora-runtime@{canvas_id}.service'
@@ -137,6 +154,7 @@ def prepare(canvas_id):
                 except OSError:pass
                 raise
         if not running(unit):
+            refresh_agent(directory)
             (directory/'guest.growing').unlink(missing_ok=True)
             if len(active_units()) >= MAX_ACTIVE:
                 raise Unavailable('Runtime capacity reached')
@@ -150,7 +168,7 @@ def prepare(canvas_id):
     return directory / 'vsock'
 
 
-def exchange(path, request, response_timeout=23, on_output=None):
+def exchange(path, request, response_timeout=23, on_output=None, port=5000):
     deadline = time.monotonic() + 25
     while True:
         sent = False
@@ -158,7 +176,7 @@ def exchange(path, request, response_timeout=23, on_output=None):
             conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             conn.settimeout(response_timeout)
             conn.connect(str(path))
-            conn.sendall(b'CONNECT 5000\n')
+            conn.sendall(f'CONNECT {port}\n'.encode())
             with conn.makefile('rb') as reader:
                 reply = reader.readline(1024)
                 if not reply.startswith(b'OK '):
@@ -244,11 +262,14 @@ def execute(request, on_output=None):
     stream=request.get('stream',False)
     if type(stream) is not bool: raise ValueError('Invalid stream flag')
     action=request.get('action','execute')
-    shapes={'build':{'canvasId','action','language','code'},'execute':{'canvasId','language','code'},'reset':{'canvasId','action'},'delete':{'canvasId','action'},'java_dependencies':{'canvasId','action'},
+    shapes={'notebook':{'canvasId','action','operation','notebook','code'},'terminal':{'canvasId','action','owner','terminal','operation','data','cols','rows','offset'},'build':{'canvasId','action','language','code'},'execute':{'canvasId','language','code'},'reset':{'canvasId','action'},'delete':{'canvasId','action'},'java_dependencies':{'canvasId','action'},
             'resources_set':{'canvasId','action','template','revision'},
             'disk_set':{'canvasId','action','sizeGiB','revision'},
             'settings_get':{'canvasId','action'},'settings_set':{'canvasId','action','language','config','revision'}}
     if action not in shapes or set(request) - ({'stdin','stream'} if action=='execute' else set()) != shapes[action]: raise ValueError('Invalid request')
+    if action=='notebook':
+        import re
+        if request['operation'] not in ('prepare','execute','reset') or not isinstance(request['notebook'],str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',request['notebook']) or not isinstance(request['code'],str) or len(request['code'].encode())>65536:raise ValueError('Invalid notebook request')
     if action in ('execute','build'):
         if 'stdin' in request and (not isinstance(request['stdin'],str) or len(request['stdin'].encode())>65536): raise ValueError('Invalid stdin')
         language,code=request['language'],request['code']
@@ -265,6 +286,32 @@ def execute(request, on_output=None):
         if type(request['revision']) is not int or request['revision']<0: raise ValueError('Invalid revision')
     if action!='delete' and (STATE/'deleted'/str(canvas_id)).exists(): raise ValueError('삭제된 캔버스의 실행 환경입니다.')
     if action=='settings_get': return settings(canvas_id)
+    if action=='terminal':
+        import re
+        if type(request['owner']) is not int or request['owner']<=0 or not isinstance(request['terminal'],str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',request['terminal']):raise ValueError('Invalid terminal owner or object')
+        if request['operation'] not in ('open','poll','input','resize','close') or not isinstance(request['data'],str) or len(request['data'].encode())>8192 or type(request['cols']) is not int or not 2<=request['cols']<=300 or type(request['rows']) is not int or not 2<=request['rows']<=150 or type(request['offset']) is not int or request['offset']<0:raise ValueError('Invalid terminal request')
+        with guard:terminal_lock=locks.setdefault(canvas_id,threading.Lock())
+        if request['operation']!='open' and not running(f'agora-runtime@{canvas_id}.service'):return {'expired':True}
+        payload={key:request[key] for key in ('operation','data','cols','rows','offset')};payload['session']=str(request['owner'])+':'+request['terminal'];payload['pythonEngine']=settings(canvas_id)['languages']['python']['engine']
+        directory=CANVASES/str(canvas_id)
+        version=agent_version();marker=directory/'agent-version'
+        if request['operation']=='open' and not getattr(request_slot,'defer_upgrade',False) and version and (not marker.exists() or marker.read_text()!=version):
+            if not terminal_lock.acquire(blocking=False):raise Unavailable('A program is running; retry terminal after it completes')
+            try:
+                if (STATE/'deleted'/str(canvas_id)).exists():raise ValueError('Deleted canvas')
+                if running(f'agora-runtime@{canvas_id}.service'):command('systemctl','stop',f'agora-runtime@{canvas_id}.service')
+                path=prepare(canvas_id)
+            finally:terminal_lock.release()
+        elif running(f'agora-runtime@{canvas_id}.service'):
+            path=directory/'vsock'
+        else:
+            with terminal_lock:
+                if (STATE/'deleted'/str(canvas_id)).exists():raise ValueError('Deleted canvas')
+                path=prepare(canvas_id)
+        with guard:
+            if canvas_id not in locks or (STATE/'deleted'/str(canvas_id)).exists():raise Unavailable('Deleted runtime')
+            last_used[canvas_id]=time.monotonic()
+        return exchange(path,payload,response_timeout=5,port=5001)
     with guard: lock=locks.setdefault(canvas_id,threading.Lock())
     if not lock.acquire(blocking=False): raise Unavailable('A program is already running in this canvas')
     try:
@@ -312,6 +359,15 @@ def execute(request, on_output=None):
             current['revision']+=1
             save_settings(canvas_id,current)
             return current
+        if action=='notebook':
+            directory=CANVASES/str(canvas_id);version=agent_version();marker=directory/'agent-version'
+            if running(f'agora-runtime@{canvas_id}.service') and version and (not marker.exists() or marker.read_text()!=version):
+                if request['operation']!='prepare':return {'exitCode':1,'outputs':[],'error':'환경 준비를 눌러 새 주피터 기능을 적용하세요. VM이 한 번 재시작되며 파일은 유지됩니다.'}
+                command('systemctl','stop',f'agora-runtime@{canvas_id}.service')
+            payload={key:request[key] for key in ('action','operation','notebook','code')};payload['runtime']=settings(canvas_id)['languages']['python']
+            result=exchange(prepare(canvas_id),payload,response_timeout=210 if request['operation']=='prepare' else 50)
+            with guard:last_used[canvas_id]=time.monotonic()
+            return result
         if action=='java_dependencies':
             result=exchange(prepare(canvas_id),{'action':'java_dependencies','runtime':settings(canvas_id)['languages']['java']},response_timeout=185)
             with guard:last_used[canvas_id]=time.monotonic()
@@ -350,6 +406,76 @@ def reap():
                     lock.release()
 
 
+def terminal_legacy_attach(request,handler,result):
+    canvas_id=request['canvasId'];cursor=result.get('offset',request['offset'])
+    base={key:request[key] for key in ('cols','rows')}
+    base.update(session=str(request['owner'])+':'+request['terminal'],pythonEngine=settings(canvas_id)['languages']['python']['engine'])
+    handler.connection.sendall(json.dumps({'type':'ready',**result}).encode()+b'\n')
+    handler.connection.setblocking(False);pending=bytearray(handler.rfile.read1(16384));handler.connection.settimeout(5)
+    heartbeat=time.monotonic();refreshed=heartbeat
+    while True:
+        readable,_,_=select.select([handler.connection],[],[],.02)
+        if readable:
+            data=handler.rfile.read1(16384)
+            if not data:return
+            pending.extend(data)
+        if len(pending)>60000:raise ValueError('Terminal input too large')
+        commands=[]
+        while b'\n' in pending:
+            wire,_,tail=pending.partition(b'\n');pending=bytearray(tail);command=json.loads(wire)
+            if not isinstance(command,dict) or set(command)!={'operation','data','cols','rows'} or command['operation'] not in ('input','resize','close'):raise ValueError('Invalid terminal command')
+            commands.append(command)
+        if not commands:commands=[{'operation':'poll','data':'',**{key:base[key] for key in ('cols','rows')}}]
+        for command in commands:
+            result=exchange(CANVASES/str(canvas_id)/'vsock',{**base,**command,'offset':cursor},response_timeout=5,port=5001)
+            if result.get('error') or result.get('expired'):raise Unavailable('Terminal session expired')
+            cursor=result.get('offset',cursor)
+            if result.get('closed'):
+                handler.connection.sendall(json.dumps({'type':'closed',**result}).encode()+b'\n');return
+            if result.get('data') or result.get('exited') or time.monotonic()-heartbeat>=5:
+                handler.connection.sendall(json.dumps({'type':'output',**result}).encode()+b'\n');heartbeat=time.monotonic()
+            if result.get('exited'):return
+        if time.monotonic()-refreshed>=5:
+            with guard:
+                if canvas_id not in locks or (STATE/'deleted'/str(canvas_id)).exists():raise Unavailable('Deleted runtime')
+                last_used[canvas_id]=time.monotonic()
+            refreshed=time.monotonic()
+
+def terminal_attach(request, handler):
+    canvas_id=request.get('canvasId');directory=CANVASES/str(canvas_id);marker=directory/'agent-version';version=agent_version()
+    legacy=type(canvas_id)is int and running(f'agora-runtime@{canvas_id}.service') and version and (not marker.exists() or marker.read_text()!=version)
+    initial={**request,'action':'terminal','operation':'open'}
+    request_slot.defer_upgrade=True
+    try:result=execute(initial)
+    finally:request_slot.defer_upgrade=False
+    if 'error' in result:raise Unavailable('Terminal could not open')
+    if legacy:return terminal_legacy_attach(request,handler,result)
+    guest=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);guest.settimeout(5)
+    try:
+        guest.connect(str(CANVASES/str(canvas_id)/'vsock'));guest.sendall(b'CONNECT 5001\n')
+        with guest.makefile('rb') as reader:
+            if not reader.readline(1024).startswith(b'OK '):raise Unavailable('Terminal guest unavailable')
+        payload={key:initial[key] for key in ('data','cols','rows','offset')}
+        payload.update(operation='attach',session=str(request['owner'])+':'+request['terminal'],pythonEngine=settings(canvas_id)['languages']['python']['engine'])
+        guest.sendall(json.dumps(payload).encode()+b'\n')
+        handler.connection.setblocking(False)
+        pending=handler.rfile.read1(16384)
+        handler.connection.settimeout(5)
+        if pending:guest.sendall(pending)
+        refreshed=time.monotonic()
+        while True:
+            readable,_,_=select.select([handler.connection,guest],[],[],1)
+            for source in readable:
+                data=handler.rfile.read1(16384) if source is handler.connection else guest.recv(16384)
+                if not data:return
+                (guest if source is handler.connection else handler.connection).sendall(data)
+            if time.monotonic()-refreshed>=5:
+                with guard:
+                    if canvas_id not in locks or (STATE/'deleted'/str(canvas_id)).exists():raise Unavailable('Deleted runtime')
+                    last_used[canvas_id]=time.monotonic()
+                refreshed=time.monotonic()
+    finally:guest.close()
+
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.connection.settimeout(30)
@@ -358,6 +484,12 @@ class Handler(socketserver.StreamRequestHandler):
             if len(data) > MAX_REQUEST or not data.endswith(b'\n'):
                 raise ValueError('Invalid request')
             request = json.loads(data)
+            if isinstance(request,dict) and request.get('action')=='terminal_attach':
+                slots.release();request_slot.released=True
+                if not terminal_slots.acquire(blocking=False):raise Unavailable('Terminal stream capacity reached')
+                try:terminal_attach(request,self)
+                finally:terminal_slots.release()
+                return
             disconnected = False
             def send_output(text):
                 nonlocal disconnected
@@ -391,10 +523,11 @@ class Server(socketserver.ThreadingUnixStreamServer):
             raise
 
     def process_request_thread(self, request, address):
+        request_slot.released=False
         try:
             super().process_request_thread(request, address)
         finally:
-            slots.release()
+            if not request_slot.released:slots.release()
 
 
 def main():
