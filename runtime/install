@@ -2,6 +2,7 @@
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 1; }
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+[[ -f "$ROOT/runtime/guest/workspace-crdt.cjs" ]] || { echo 'Build runtime/workspace with pnpm before installing.' >&2; exit 1; }
 STATE=/var/lib/agora-runtime
 [[ -x /usr/local/lib/agora-hypervisor/cloud-hypervisor ]] || { echo 'Install the managed hypervisor first.' >&2; exit 1; }
 [[ -f "$STATE/base.raw" && -f "$STATE/vmlinuz" ]] || { echo 'Run runtime/prepare-guest first.' >&2; exit 1; }
@@ -27,7 +28,7 @@ chmod 0700 "$STATE" "$STATE/canvases"
 install -m 0644 "$STATE/vmlinuz" /usr/local/lib/agora-hypervisor/root/firmware/vmlinuz
 install -m 0644 "$ROOT/runtime/runtime_options.py" /usr/local/lib/agora-hypervisor/runtime_options.py
 install -d -m 0755 /usr/local/lib/agora-hypervisor/guest
-install -m 0644 "$ROOT/runtime/guest/runner.py" "$ROOT/runtime/guest/terminal.py" "$ROOT/runtime/guest/notebook.py" "$ROOT/runtime/guest/notebook_worker.py" "$ROOT/runtime/guest/package_manager.py" /usr/local/lib/agora-hypervisor/guest/
+install -m 0644 "$ROOT/runtime/guest/runner.py" "$ROOT/runtime/guest/terminal.py" "$ROOT/runtime/guest/notebook.py" "$ROOT/runtime/guest/notebook_worker.py" "$ROOT/runtime/guest/package_manager.py" "$ROOT/runtime/guest/workspace.py" "$ROOT/runtime/guest/workspace-crdt.cjs" /usr/local/lib/agora-hypervisor/guest/
 install -m 0644 "$ROOT/runtime/agent_update.py" /usr/local/lib/agora-hypervisor/runtime-agent-update.py
 install -m 0644 "$ROOT/runtime/agora-runtime-agent@.service" /etc/systemd/system/agora-runtime-agent@.service
 install -m 0644 "$ROOT/runtime/manager.py" /usr/local/lib/agora-hypervisor/runtime-manager.py

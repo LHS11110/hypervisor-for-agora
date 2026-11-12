@@ -123,7 +123,7 @@ AGENT_SOURCE = Path('/usr/local/lib/agora-hypervisor/guest')
 
 def agent_version():
     import hashlib
-    files=[AGENT_SOURCE/'runner.py',AGENT_SOURCE/'terminal.py',AGENT_SOURCE/'notebook.py',AGENT_SOURCE/'notebook_worker.py',AGENT_SOURCE/'package_manager.py']
+    files=[AGENT_SOURCE/name for name in ('runner.py','terminal.py','notebook.py','notebook_worker.py','package_manager.py','workspace.py','workspace-crdt.cjs')]
     if not all(path.is_file() for path in files):return None
     return hashlib.sha256(b''.join(path.read_bytes() for path in files)).hexdigest()
 
@@ -262,7 +262,7 @@ def execute(request, on_output=None):
     stream=request.get('stream',False)
     if type(stream) is not bool: raise ValueError('Invalid stream flag')
     action=request.get('action','execute')
-    shapes={'notebook':{'canvasId','action','operation','notebook','code'},'terminal':{'canvasId','action','owner','terminal','operation','data','cols','rows','offset'},'build':{'canvasId','action','language','code'},'execute':{'canvasId','language','code'},'reset':{'canvasId','action'},'delete':{'canvasId','action'},'java_dependencies':{'canvasId','action'},
+    shapes={'workspace':{'canvasId','action','request'},'notebook':{'canvasId','action','operation','notebook','code'},'terminal':{'canvasId','action','owner','terminal','operation','data','cols','rows','offset'},'build':{'canvasId','action','language','code'},'execute':{'canvasId','language','code'},'reset':{'canvasId','action'},'delete':{'canvasId','action'},'java_dependencies':{'canvasId','action'},
             'resources_set':{'canvasId','action','template','revision'},
             'disk_set':{'canvasId','action','sizeGiB','revision'},
             'settings_get':{'canvasId','action'},'settings_set':{'canvasId','action','language','config','revision'}}
@@ -286,6 +286,23 @@ def execute(request, on_output=None):
         if type(request['revision']) is not int or request['revision']<0: raise ValueError('Invalid revision')
     if action!='delete' and (STATE/'deleted'/str(canvas_id)).exists(): raise ValueError('삭제된 캔버스의 실행 환경입니다.')
     if action=='settings_get': return settings(canvas_id)
+    if action=='workspace':
+        # The guest file service has its own listener, so running kernels do not block editing.
+        if not isinstance(request['request'],dict) or len(json.dumps(request['request']).encode())>700000:
+            raise ValueError('Invalid workspace request')
+        with guard:workspace_lock=locks.setdefault(canvas_id,threading.Lock())
+        directory=CANVASES/str(canvas_id)
+        if running(f'agora-runtime@{canvas_id}.service'):
+            version=agent_version();marker=directory/'agent-version'
+            if not version or not marker.exists() or marker.read_text()!=version:
+                return {'error':'WORKSPACE_AGENT_UPGRADE_REQUIRED'}
+            path=directory/'vsock'
+        else:
+            with workspace_lock:
+                if (STATE/'deleted'/str(canvas_id)).exists():raise ValueError('Deleted canvas')
+                path=prepare(canvas_id)
+        with guard:last_used[canvas_id]=time.monotonic()
+        return exchange(path,request['request'],response_timeout=15,port=5003)
     if action=='terminal':
         import re
         if type(request['owner']) is not int or request['owner']<=0 or not isinstance(request['terminal'],str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',request['terminal']):raise ValueError('Invalid terminal owner or object')

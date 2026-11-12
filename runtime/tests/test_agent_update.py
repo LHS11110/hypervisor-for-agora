@@ -13,6 +13,7 @@ class AgentUpdateTests(unittest.TestCase):
  def test_stopped_disk_update_is_idempotent_and_keeps_workspace(self):
   with tempfile.TemporaryDirectory() as temporary:
    root=Path(temporary);source=root/'source';source.mkdir();(source/'runner.py').write_text('runner');(source/'terminal.py').write_text('terminal');(source/'notebook.py').write_text('notebook');(source/'notebook_worker.py').write_text('worker');(source/'package_manager.py').write_text('packages');directory=root/'state/42';directory.mkdir(parents=True);(directory/'guest.raw').touch();calls=[]
+   for name in ('workspace.py','workspace-crdt.cjs'):(source/name).write_text(name)
    def command(*args):
     calls.append(args)
     if args[0]=='mount':

@@ -27,7 +27,7 @@ try:
     updated.append((disk,key))
     extra=mount/'usr/local/lib/terminal.py'
     if extra.exists():shutil.copy2(extra,backup/(key+'-terminal.py'))
-    for name in ('notebook.py','notebook_worker.py','package_manager.py'):
+    for name in ('notebook.py','notebook_worker.py','package_manager.py','workspace.py','workspace-crdt.cjs'):
      target=mount/'usr/local/lib'/name
      if target.exists():shutil.copy2(target,backup/(key+'-'+name))
      shutil.copyfile(root/'guest'/name,target);os.chmod(target,0o644)
@@ -38,7 +38,7 @@ try:
     run('sync','-f',str(mount))
    finally:run('umount',str(mount))
  source=manager.parent/'guest';source.mkdir(exist_ok=True)
- for name in ('runner.py','terminal.py','notebook.py','notebook_worker.py','package_manager.py'):shutil.copyfile(root/'guest'/name,source/name)
+ for name in ('runner.py','terminal.py','notebook.py','notebook_worker.py','package_manager.py','workspace.py','workspace-crdt.cjs'):shutil.copyfile(root/'guest'/name,source/name)
  shutil.copyfile(root/'agent_update.py',manager.parent/'runtime-agent-update.py')
  shutil.copyfile(root/'agora-runtime-agent@.service',Path('/etc/systemd/system/agora-runtime-agent@.service'))
  run('systemctl','daemon-reload')
@@ -53,7 +53,7 @@ except BaseException:
     run('mount','-o','loop,rw,nosuid,nodev,noexec',str(disk),temporary)
     try:
      shutil.copyfile(backup/(key+'-runner.py'),Path(temporary)/'usr/local/lib/agora-runner.py')
-     for name in ('notebook.py','notebook_worker.py','package_manager.py'):
+     for name in ('notebook.py','notebook_worker.py','package_manager.py','workspace.py','workspace-crdt.cjs'):
       target=Path(temporary)/'usr/local/lib'/name
       if (backup/(key+'-'+name)).exists():shutil.copyfile(backup/(key+'-'+name),target)
       else:target.unlink(missing_ok=True)

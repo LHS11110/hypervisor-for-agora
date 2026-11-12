@@ -4,6 +4,7 @@ set -euo pipefail
 umask 077
 [[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 1; }
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+[[ -f "$ROOT/runtime/guest/workspace-crdt.cjs" ]] || { echo 'Build runtime/workspace with pnpm before preparing the guest.' >&2; exit 1; }
 DEST=${1:-/var/lib/agora-runtime}
 [[ "$DEST" = /* && ! -L "$DEST" ]] || { echo 'Expected a safe absolute destination.' >&2; exit 1; }
 for command in docker mkfs.ext4 zstd modprobe; do command -v "$command" >/dev/null; done

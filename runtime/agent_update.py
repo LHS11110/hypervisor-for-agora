@@ -10,14 +10,15 @@ def update(canvas_id):
  canvas_id=str(int(canvas_id));directory=STATE/canvas_id;disk=directory/'guest.raw'
  if subprocess.run(['systemctl','is-active','--quiet',f'agora-runtime@{canvas_id}.service']).returncode==0:raise RuntimeError('Guest must be stopped')
  if not disk.is_file():raise ValueError('Guest disk missing')
- version=hashlib.sha256(b''.join((SOURCE/name).read_bytes() for name in ('runner.py','terminal.py','notebook.py','notebook_worker.py','package_manager.py'))).hexdigest()
+ names=('runner.py','terminal.py','notebook.py','notebook_worker.py','package_manager.py','workspace.py','workspace-crdt.cjs')
+ version=hashlib.sha256(b''.join((SOURCE/name).read_bytes() for name in names)).hexdigest()
  marker=directory/'agent-version'
  if marker.exists() and marker.read_text()==version:return
  with tempfile.TemporaryDirectory(prefix='agora-agent-patch-') as temporary:
   run('mount','-o','loop,rw,nosuid,nodev,noexec',str(disk),temporary)
   try:
    lib=Path(temporary)/'usr/local/lib'
-   for source,name in [('terminal.py','terminal.py'),('runner.py','agora-runner.py'),('notebook.py','notebook.py'),('notebook_worker.py','notebook_worker.py'),('package_manager.py','package_manager.py')]:
+   for source,name in [(name,'agora-runner.py' if name=='runner.py' else name) for name in names]:
     staged=lib/(name+'.new');staged.unlink(missing_ok=True)
     shutil.copyfile(SOURCE/source,staged);os.chmod(staged,0o644);os.replace(staged,lib/name)
    vendor=SOURCE/'notebook-py312'

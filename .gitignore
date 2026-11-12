@@ -168,3 +168,5 @@ appendonlydir/
 *.db
 *.sqlite
 *.sqlite3
+runtime/workspace/node_modules/
+runtime/guest/workspace-crdt.cjs
